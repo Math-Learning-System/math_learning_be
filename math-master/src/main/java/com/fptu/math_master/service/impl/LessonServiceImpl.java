@@ -60,7 +60,8 @@ public class LessonServiceImpl implements LessonService {
             .chapterId(request.getChapterId())
             .title(request.getTitle())
             .learningObjectives(request.getLearningObjectives())
-            .lessonContent(request.getLessonContent())
+            .lessonContent(
+                request.getLessonContent() != null ? request.getLessonContent() : "")
             .summary(request.getSummary())
             .orderIndex(orderIndex)
             .durationMinutes(request.getDurationMinutes())
@@ -111,7 +112,9 @@ public class LessonServiceImpl implements LessonService {
     if (request.getTitle() != null) lesson.setTitle(request.getTitle());
     if (request.getLearningObjectives() != null)
       lesson.setLearningObjectives(request.getLearningObjectives());
-    if (request.getLessonContent() != null) lesson.setLessonContent(request.getLessonContent());
+    if (request.getLessonContent() != null) {
+      lesson.setLessonContent(request.getLessonContent());
+    }
     if (request.getSummary() != null) lesson.setSummary(request.getSummary());
     if (request.getOrderIndex() != null) lesson.setOrderIndex(request.getOrderIndex());
     if (request.getDurationMinutes() != null)

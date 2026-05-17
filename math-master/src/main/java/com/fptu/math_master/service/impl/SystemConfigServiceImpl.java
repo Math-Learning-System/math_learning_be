@@ -12,6 +12,7 @@ import com.fptu.math_master.entity.SystemConfig;
 import com.fptu.math_master.exception.AppException;
 import com.fptu.math_master.exception.ErrorCode;
 import com.fptu.math_master.repository.SystemConfigRepository;
+import com.fptu.math_master.service.AssessmentImportConfigService;
 import com.fptu.math_master.service.SystemConfigService;
 
 import lombok.AccessLevel;
@@ -24,6 +25,7 @@ import lombok.experimental.FieldDefaults;
 public class SystemConfigServiceImpl implements SystemConfigService {
 
     SystemConfigRepository systemConfigRepository;
+    AssessmentImportConfigService assessmentImportConfigService;
 
     @Override
     @Transactional(readOnly = true)
@@ -49,6 +51,10 @@ public class SystemConfigServiceImpl implements SystemConfigService {
         SystemConfig config = systemConfigRepository
                 .findByConfigKeyAndDeletedAtIsNull(key)
                 .orElseThrow(() -> new AppException(ErrorCode.SYSTEM_CONFIG_NOT_FOUND));
+
+        if (AssessmentImportConfigService.CONFIG_KEY.equals(key)) {
+            assessmentImportConfigService.validateOptionsJson(request.configValue());
+        }
 
         config.setConfigValue(request.configValue());
         config.setUpdatedBy(updatedBy);

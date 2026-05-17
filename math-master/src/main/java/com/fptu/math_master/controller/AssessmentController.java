@@ -19,6 +19,9 @@ import com.fptu.math_master.dto.response.PagedDataResponse;
 import com.fptu.math_master.dto.response.PercentageBasedGenerationResponse;
 import com.fptu.math_master.dto.response.QuestionResponse;
 import com.fptu.math_master.enums.AssessmentStatus;
+import com.fptu.math_master.dto.response.AssessmentImportResponse;
+import com.fptu.math_master.enums.AssessmentType;
+import com.fptu.math_master.service.AssessmentImportService;
 import com.fptu.math_master.service.AssessmentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -33,8 +36,10 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.MediaType;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 @RestController
 @RequestMapping("/assessments")
@@ -45,7 +50,80 @@ import org.springframework.web.bind.annotation.*;
 public class AssessmentController {
 
   AssessmentService assessmentService;
+  AssessmentImportService assessmentImportService;
+  com.fptu.math_master.service.AssessmentImportConfigService assessmentImportConfigService;
   com.fptu.math_master.service.QuestionSelectionService questionSelectionService;
+
+  @GetMapping("/import-form-options")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(
+      summary = "Get form options for PDF assessment import",
+      description = "Returns admin-configured school years and exam types for the import form.")
+  public ApiResponse<com.fptu.math_master.dto.response.AssessmentImportFormOptionsResponse>
+      getImportFormOptions() {
+    return ApiResponse.<com.fptu.math_master.dto.response.AssessmentImportFormOptionsResponse>builder()
+        .result(assessmentImportConfigService.getFormOptions())
+        .build();
+  }
+
+  @PostMapping(value = "/import-from-pdf", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(
+      summary = "Import assessment from PDF",
+      description =
+          "Upload a PDF exam document. AI extracts questions and creates a DRAFT assessment "
+              + "in DIRECT mode for teacher/admin review.")
+  public ApiResponse<AssessmentImportResponse> importAssessmentFromPdf(
+      @RequestParam("file") MultipartFile file,
+      @RequestParam(required = false) String examTitle,
+      @RequestParam(required = false) String schoolYear,
+      @RequestParam(required = false) String department,
+      @RequestParam(required = false) String examDate,
+      @RequestParam(required = false) String examType,
+      @RequestParam(required = false) String examScope,
+      @RequestParam(required = false) String organizerName,
+      @RequestParam(required = false) String organizerType,
+      @RequestParam(required = false) String provinceCity,
+      @RequestParam(required = false) String district,
+      @RequestParam(required = false) String schoolName,
+      @RequestParam(required = false) String country,
+      @RequestParam(required = false) UUID schoolGradeId,
+      @RequestParam(required = false) UUID subjectId,
+      @RequestParam(required = false) String contextHint,
+      @RequestParam(required = false) UUID questionBankId,
+      @RequestParam(required = false) AssessmentType assessmentType,
+      @RequestParam(required = false) Integer timeLimitMinutes) {
+    log.info("REST request to import assessment from PDF: {}", file.getOriginalFilename());
+    com.fptu.math_master.dto.request.PdfAssessmentImportFormInput form =
+        com.fptu.math_master.dto.request.PdfAssessmentImportFormInput.builder()
+            .examTitle(examTitle)
+            .schoolYear(schoolYear)
+            .department(department)
+            .examDate(examDate)
+            .examType(examType)
+            .examScope(examScope)
+            .organizerName(organizerName)
+            .organizerType(organizerType)
+            .provinceCity(provinceCity)
+            .district(district)
+            .schoolName(schoolName)
+            .country(country)
+            .schoolGradeId(schoolGradeId)
+            .subjectId(subjectId)
+            .contextHint(contextHint)
+            .questionBankId(questionBankId)
+            .assessmentType(assessmentType)
+            .timeLimitMinutes(timeLimitMinutes)
+            .build();
+    AssessmentImportResponse response = assessmentImportService.importAssessmentFromPdf(file, form);
+    return ApiResponse.<AssessmentImportResponse>builder()
+        .message(
+            "Đã tạo đề nháp từ PDF với "
+                + response.getQuestionsImported()
+                + " câu hỏi. Vui lòng rà soát trước khi công khai.")
+        .result(response)
+        .build();
+  }
 
   @PostMapping
   @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")

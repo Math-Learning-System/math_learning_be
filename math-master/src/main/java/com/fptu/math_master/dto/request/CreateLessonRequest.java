@@ -22,7 +22,7 @@ public class CreateLessonRequest {
 
   private String learningObjectives;
 
-  @NotBlank(message = "Lesson content is required")
+  /** Optional at creation; may be filled later. */
   private String lessonContent;
 
   private String summary;
