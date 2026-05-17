@@ -31,4 +31,9 @@ public class AssessmentQuestionResponse {
   private String[] tags;
   private CognitiveLevel cognitiveLevel;
   private Instant createdAt;
+  private BigDecimal pointsOverride;
+  private Integer pageNumber;
+  private String sectionLabel;
+  /** Full-page OCR reference — not shown as an exam question in the page workspace. */
+  private Boolean pageSource;
 }

@@ -169,6 +169,18 @@ public class Assessment extends BaseEntity {
   @Column(name = "source_pdf_original_name", length = 255)
   private String sourcePdfOriginalName;
 
+  /** JSON: {"pages":[{"pageNumber":1,"text":"..."}, ...]} from PDF OCR wizard. */
+  @Column(name = "pdf_import_pages_json", columnDefinition = "TEXT")
+  private String pdfImportPagesJson;
+
+  /** Structured blocks for teacher review (question + answer sections). */
+  @Column(name = "pdf_import_document_json", columnDefinition = "TEXT")
+  private String pdfImportDocumentJson;
+
+  /** Wizard form fields (step 1–2) for detail display. */
+  @Column(name = "pdf_import_metadata_json", columnDefinition = "TEXT")
+  private String pdfImportMetadataJson;
+
   /**
    * Relationships
    * - Many-to-One with User (teacher)

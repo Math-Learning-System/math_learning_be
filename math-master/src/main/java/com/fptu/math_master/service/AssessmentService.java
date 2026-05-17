@@ -11,6 +11,8 @@ import com.fptu.math_master.dto.request.GenerateAssessmentQuestionsRequest;
 import com.fptu.math_master.dto.request.PointsOverrideRequest;
 import com.fptu.math_master.dto.response.AssessmentGenerationResponse;
 import com.fptu.math_master.dto.response.AssessmentQuestionResponse;
+import com.fptu.math_master.dto.request.UpdateAssessmentPdfImportDocumentRequest;
+import com.fptu.math_master.dto.response.AssessmentPdfImportDocumentResponse;
 import com.fptu.math_master.dto.response.AssessmentResponse;
 import com.fptu.math_master.dto.response.AssessmentSummary;
 import com.fptu.math_master.dto.response.DistributeAssessmentPointsResponse;
@@ -54,6 +56,15 @@ public interface AssessmentService {
 
   /** Presigned URL for PDF uploaded via import (Cách 2). */
   com.fptu.math_master.dto.response.AssessmentSourcePdfUrlResponse getImportSourcePdfUrl(UUID id);
+
+  /** Structured OCR blocks (câu hỏi / đáp án) for PDF-imported assessments. */
+  AssessmentPdfImportDocumentResponse getPdfImportDocument(UUID id);
+
+  AssessmentPdfImportDocumentResponse updatePdfImportDocument(
+      UUID id, UpdateAssessmentPdfImportDocumentRequest request);
+
+  AssessmentResponse updatePdfImportMetadata(
+      UUID id, com.fptu.math_master.dto.request.UpdateAssessmentPdfImportMetadataRequest request);
 
   Page<AssessmentResponse> getMyAssessments(AssessmentStatus status, String search, Pageable pageable);
 

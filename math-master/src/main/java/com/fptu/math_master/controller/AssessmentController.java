@@ -9,7 +9,15 @@ import com.fptu.math_master.dto.request.DistributeAssessmentPointsRequest;
 import com.fptu.math_master.dto.request.GenerateAssessmentByPercentageRequest;
 import com.fptu.math_master.dto.request.GenerateAssessmentQuestionsRequest;
 import com.fptu.math_master.dto.request.PointsOverrideRequest;
+import com.fptu.math_master.dto.request.UpdateAssessmentPdfImportDocumentRequest;
+import com.fptu.math_master.configuration.properties.MinioProperties;
 import com.fptu.math_master.dto.response.ApiResponse;
+import com.fptu.math_master.dto.response.AssessmentPdfImportDocumentResponse;
+import com.fptu.math_master.dto.response.BookPageImagePresignedUrlResponse;
+import com.fptu.math_master.dto.response.BookPageImageResponse;
+import com.fptu.math_master.exception.AppException;
+import com.fptu.math_master.exception.ErrorCode;
+import com.fptu.math_master.service.UploadService;
 import com.fptu.math_master.dto.response.AssessmentGenerationResponse;
 import com.fptu.math_master.dto.response.AssessmentQuestionResponse;
 import com.fptu.math_master.dto.response.AssessmentResponse;
@@ -37,7 +45,9 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -55,6 +65,8 @@ public class AssessmentController {
   com.fptu.math_master.service.PythonCrawlerClient pythonCrawlerClient;
   com.fptu.math_master.service.AssessmentImportConfigService assessmentImportConfigService;
   com.fptu.math_master.service.QuestionSelectionService questionSelectionService;
+  UploadService uploadService;
+  MinioProperties minioProperties;
 
   @GetMapping("/import-form-options")
   @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
@@ -194,6 +206,126 @@ public class AssessmentController {
     return ApiResponse.<AssessmentSourcePdfUrlResponse>builder()
         .result(assessmentService.getImportSourcePdfUrl(id))
         .build();
+  }
+
+  @GetMapping("/{id}/pdf-import-document")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Get structured OCR blocks for PDF import review")
+  public ApiResponse<AssessmentPdfImportDocumentResponse> getPdfImportDocument(@PathVariable UUID id) {
+    return ApiResponse.<AssessmentPdfImportDocumentResponse>builder()
+        .result(assessmentService.getPdfImportDocument(id))
+        .build();
+  }
+
+  @PutMapping("/{id}/pdf-import-document")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Save structured OCR blocks (câu hỏi / đáp án)")
+  public ApiResponse<AssessmentPdfImportDocumentResponse> updatePdfImportDocument(
+      @PathVariable UUID id,
+      @Valid @RequestBody UpdateAssessmentPdfImportDocumentRequest request) {
+    return ApiResponse.<AssessmentPdfImportDocumentResponse>builder()
+        .message("Đã lưu nội dung rà soát PDF.")
+        .result(assessmentService.updatePdfImportDocument(id, request))
+        .build();
+  }
+
+  @PutMapping("/{id}/pdf-import-metadata")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Update PDF import wizard metadata (thông tin chi tiết)")
+  public ApiResponse<AssessmentResponse> updatePdfImportMetadata(
+      @PathVariable UUID id,
+      @Valid @RequestBody
+          com.fptu.math_master.dto.request.UpdateAssessmentPdfImportMetadataRequest request) {
+    return ApiResponse.<AssessmentResponse>builder()
+        .message("Đã cập nhật thông tin chi tiết.")
+        .result(assessmentService.updatePdfImportMetadata(id, request))
+        .build();
+  }
+
+  @PostMapping(value = "/{id}/import-images", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Upload image for PDF import content block")
+  public ApiResponse<BookPageImageResponse> uploadImportImage(
+      @PathVariable UUID id, @RequestParam("file") MultipartFile file) {
+    if (file == null || file.isEmpty()) {
+      throw new AppException(ErrorCode.INVALID_REQUEST);
+    }
+    String contentType = file.getContentType();
+    if (contentType == null || !contentType.startsWith("image/")) {
+      throw new AppException(ErrorCode.INVALID_REQUEST);
+    }
+    assessmentService.getPdfImportDocument(id);
+
+    String directory = "assessments/" + id + "/import-images";
+    String objectKey =
+        uploadService.uploadFile(file, directory, minioProperties.getOcrContentBucket());
+    int slash = objectKey.lastIndexOf('/');
+    String fileName = slash >= 0 ? objectKey.substring(slash + 1) : objectKey;
+    String imageUrl = "/api/v1/assessments/" + id + "/import-images/" + fileName;
+    return ApiResponse.<BookPageImageResponse>builder()
+        .result(new BookPageImageResponse(imageUrl, objectKey))
+        .build();
+  }
+
+  @GetMapping("/{id}/import-images/presigned")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Presigned URL for PDF import block image")
+  public ApiResponse<BookPageImagePresignedUrlResponse> getImportImagePresignedUrl(
+      @PathVariable UUID id, @RequestParam("fileName") String fileName) {
+    assessmentService.getPdfImportDocument(id);
+    String safeName = sanitizeImportImageFileName(fileName);
+    String key = "assessments/" + id + "/import-images/" + safeName;
+    try {
+      String url = uploadService.getPresignedUrl(key, minioProperties.getOcrContentBucket());
+      return ApiResponse.<BookPageImagePresignedUrlResponse>builder()
+          .result(new BookPageImagePresignedUrlResponse(url))
+          .build();
+    } catch (Exception ex) {
+      log.warn("Presign failed for assessment {} import-image {}", id, safeName, ex);
+      throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION, "Could not generate image URL");
+    }
+  }
+
+  @GetMapping("/{id}/import-images/{fileName:.+}")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Serve uploaded PDF import block image")
+  public ResponseEntity<byte[]> serveImportImage(
+      @PathVariable UUID id, @PathVariable String fileName) {
+    assessmentService.getPdfImportDocument(id);
+    String safeName = sanitizeImportImageFileName(fileName);
+    String key = "assessments/" + id + "/import-images/" + safeName;
+    byte[] data = uploadService.downloadFile(key, minioProperties.getOcrContentBucket());
+    return ResponseEntity.ok()
+        .contentType(MediaType.parseMediaType(guessImportImageContentType(safeName)))
+        .cacheControl(CacheControl.noStore())
+        .body(data);
+  }
+
+  private static String sanitizeImportImageFileName(String fileName) {
+    if (fileName == null || fileName.isBlank()) {
+      throw new AppException(ErrorCode.INVALID_REQUEST);
+    }
+    if (fileName.contains("/") || fileName.contains("\\") || fileName.contains("..")) {
+      throw new AppException(ErrorCode.INVALID_REQUEST);
+    }
+    return fileName;
+  }
+
+  private static String guessImportImageContentType(String fileName) {
+    String lower = fileName.toLowerCase();
+    if (lower.endsWith(".png")) {
+      return "image/png";
+    }
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+      return "image/jpeg";
+    }
+    if (lower.endsWith(".webp")) {
+      return "image/webp";
+    }
+    if (lower.endsWith(".gif")) {
+      return "image/gif";
+    }
+    return "application/octet-stream";
   }
 
   @PostMapping

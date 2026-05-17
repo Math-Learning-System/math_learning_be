@@ -1,5 +1,6 @@
 package com.fptu.math_master.dto.response;
 
+import com.fptu.math_master.dto.response.pdfimport.PdfImportPageDto;
 import com.fptu.math_master.enums.AssessmentMode;
 import com.fptu.math_master.enums.AssessmentStatus;
 import com.fptu.math_master.enums.AssessmentType;
@@ -52,6 +53,15 @@ public class AssessmentResponse {
   private String sourcePdfPath;
   /** Original PDF filename from import. */
   private String sourcePdfOriginalName;
+
+  /** OCR LaTeX/text per page (PDF import Cách 2). */
+  private List<PdfImportPageDto> pdfImportPages;
+
+  /** Editable OCR blocks (câu hỏi / đáp án sections). */
+  private AssessmentPdfImportDocumentResponse pdfImportDocument;
+
+  /** PDF import wizard metadata (step 1–2 form, not OCR body). */
+  private AssessmentPdfImportMetadataResponse pdfImportMetadata;
 
   // BUG FIX #4: Detailed lesson information from matrix
   private List<AssessmentLessonInfo> lessons;

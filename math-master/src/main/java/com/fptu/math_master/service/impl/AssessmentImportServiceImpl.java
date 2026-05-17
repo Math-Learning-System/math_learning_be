@@ -7,6 +7,7 @@ import com.fptu.math_master.dto.request.PdfAssessmentImportFormInput;
 import com.fptu.math_master.dto.response.AssessmentImportResponse;
 import com.fptu.math_master.dto.response.AssessmentResponse;
 import com.fptu.math_master.dto.response.QuestionResponse;
+import com.fptu.math_master.dto.response.pdfimport.PdfImportPageDto;
 import com.fptu.math_master.dto.response.pdfimport.PdfImportedExamDto;
 import com.fptu.math_master.dto.response.pdfimport.PdfImportedQuestionDto;
 import com.fptu.math_master.dto.response.pdfimport.PdfImportedTableDataDto;
@@ -32,6 +33,8 @@ import com.fptu.math_master.configuration.properties.MinioProperties;
 import com.fptu.math_master.dto.response.AssessmentPdfExtractResponse;
 import com.fptu.math_master.service.AssessmentImportConfigService;
 import com.fptu.math_master.service.AssessmentImportService;
+import com.fptu.math_master.service.AssessmentPdfImportDocumentHelper;
+import com.fptu.math_master.service.AssessmentPdfImportMetadataHelper;
 import com.fptu.math_master.service.AssessmentService;
 import com.fptu.math_master.service.PythonCrawlerClient;
 import com.fptu.math_master.service.QuestionService;
@@ -89,6 +92,8 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     if (form == null) {
       form = PdfAssessmentImportFormInput.builder().build();
     }
+    form = enrichFormFromPreExtractedWizard(form);
+    var importFormOptions = assessmentImportConfigService.getFormOptions();
 
     assessmentImportConfigService.assertSchoolYearAllowed(form.schoolYear());
     assessmentImportConfigService.assertExamTypeAllowed(form.examType());
@@ -124,12 +129,14 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     String extractedText =
         pythonExtract.getExtractedText() != null ? pythonExtract.getExtractedText() : "";
     PdfImportedExamDto exam = mergeExamWithForm(payload.exam(), form, sourceFile);
-    List<PdfImportedQuestionDto> questions = payload.questions();
+    List<PdfImportedQuestionDto> questions =
+        payload.questions() != null ? payload.questions() : List.of();
+    boolean manualBuild = isManualQuestionBuild(pythonExtract);
 
-    if (questions.isEmpty()) {
+    if (questions.isEmpty() && !hasOcrPages(pythonExtract)) {
       throw new AppException(
           ErrorCode.INVALID_KEY,
-          "Không nhận diện được câu hỏi trong đề. Vui lòng kiểm tra file hoặc thử bổ sung gợi ý môn học.");
+          "Không trích được nội dung theo trang. Hoàn tất OCR ở bước 2 hoặc kiểm tra file PDF.");
     }
 
     String assessmentTitle =
@@ -145,7 +152,7 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
         Assessment.builder()
             .teacherId(currentUserId)
             .title(assessmentTitle)
-            .description(buildAssessmentDescription(exam))
+            .description(null)
             .assessmentType(resolvedType)
             .timeLimitMinutes(resolvedDuration)
             .passingScore(BigDecimal.valueOf(50))
@@ -169,12 +176,33 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
           "Không lưu được file PDF lên kho lưu trữ. Kiểm tra MinIO đang chạy và thử lại.");
     }
 
+    persistPdfImportPages(assessment, pythonExtract);
+    persistPdfImportDocument(assessment, listOcrPages(pythonExtract), form.pdfLayout());
+    applyPdfImportMetadataJson(assessment, form, exam, sourceFile, importFormOptions);
+    assessment = assessmentRepository.save(assessment);
+
     List<AssessmentImportResponse.ParsedQuestionPreview> previews = new ArrayList<>();
     int imported = 0;
     int skipped = 0;
     int order = 1;
 
-    for (PdfImportedQuestionDto parsed : questions) {
+    if (manualBuild) {
+      for (PdfImportPageDto page : listOcrPages(pythonExtract)) {
+        previews.add(
+            AssessmentImportResponse.ParsedQuestionPreview.builder()
+                .orderIndex(page.getPageNumber())
+                .sectionLabel(
+                    page.getSectionLabel() != null
+                        ? page.getSectionLabel()
+                        : "Trang " + page.getPageNumber())
+                .questionText(trimPreview(page.getText()))
+                .imported(false)
+                .skipReason("Tạo câu hỏi thủ công tại trang chi tiết đề")
+                .build());
+      }
+    }
+
+    for (PdfImportedQuestionDto parsed : manualBuild ? List.<PdfImportedQuestionDto>of() : questions) {
       if (!isImportable(parsed)) {
         skipped++;
         previews.add(toPreview(parsed, order, false, "Thiếu nội dung câu hỏi"));
@@ -240,7 +268,7 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
       }
     }
 
-    if (imported == 0) {
+    if (imported == 0 && !manualBuild) {
       deleteSourcePdfFromMinio(assessment);
       assessmentRepository.delete(assessment);
       throw new AppException(
@@ -254,8 +282,16 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     if (skipped > 0) {
       warnings.add("Đã bỏ qua " + skipped + " mục không đủ nội dung hoặc lỗi khi lưu.");
     }
-    warnings.add(
-        "Đề import qua Mathpix (Python): chỉnh nội dung/đáp án từng câu trước khi công khai.");
+    if (manualBuild) {
+      int pageCount = listOcrPages(pythonExtract).size();
+      warnings.add(
+          "Đã lưu "
+              + pageCount
+              + " trang OCR. Vào Chi tiết đề để tạo và chỉnh từng câu từ LaTeX theo trang.");
+    } else {
+      warnings.add(
+          "Đề import qua Mathpix (Python): chỉnh nội dung/đáp án từng câu trước khi công khai.");
+    }
 
     return AssessmentImportResponse.builder()
         .analysisSuccessful(payload.analysisSuccessful())
@@ -292,7 +328,9 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
 
   private ParsedExamPayload mapPythonExtract(
       AssessmentPdfExtractResponse response, String sourceFile) {
-    if (response == null || response.getQuestions() == null || response.getQuestions().isEmpty()) {
+    if (response == null
+        || ((!hasOcrPages(response))
+            && (response.getQuestions() == null || response.getQuestions().isEmpty()))) {
       throw new AppException(
           ErrorCode.INVALID_KEY,
           "Không trích được nội dung theo trang. Hoàn tất OCR ở bước 2 hoặc kiểm tra file PDF.");
@@ -312,7 +350,231 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
         confidence,
         warnings,
         exam,
-        response.getQuestions());
+        response.getQuestions() != null ? response.getQuestions() : List.of());
+  }
+
+  private static boolean isManualQuestionBuild(AssessmentPdfExtractResponse extract) {
+    return extract != null && Boolean.TRUE.equals(extract.getManualQuestionBuild());
+  }
+
+  private static boolean hasOcrPages(AssessmentPdfExtractResponse extract) {
+    return extract != null && extract.getPages() != null && !extract.getPages().isEmpty();
+  }
+
+  private static List<PdfImportPageDto> listOcrPages(AssessmentPdfExtractResponse extract) {
+    if (extract == null) {
+      return List.of();
+    }
+    if (hasOcrPages(extract)) {
+      return extract.getPages();
+    }
+    if (extract.getQuestions() == null) {
+      return List.of();
+    }
+    List<PdfImportPageDto> pages = new ArrayList<>();
+    for (PdfImportedQuestionDto q : extract.getQuestions()) {
+      if (q.getPageNumber() == null) {
+        continue;
+      }
+      String text =
+          q.getRawText() != null && !q.getRawText().isBlank()
+              ? q.getRawText()
+              : q.getQuestionText();
+      if (text == null || text.isBlank()) {
+        continue;
+      }
+      pages.add(
+          PdfImportPageDto.builder()
+              .pageNumber(q.getPageNumber())
+              .sectionLabel(q.getSectionLabel())
+              .text(text)
+              .build());
+    }
+    return pages;
+  }
+
+  private void persistPdfImportPages(Assessment assessment, AssessmentPdfExtractResponse extract) {
+    List<PdfImportPageDto> pages = listOcrPages(extract);
+    if (pages.isEmpty()) {
+      return;
+    }
+    try {
+      Map<String, Object> payload = new LinkedHashMap<>();
+      payload.put("pages", pages);
+      assessment.setPdfImportPagesJson(objectMapper.writeValueAsString(payload));
+    } catch (Exception ex) {
+      log.warn("Could not serialize pdf import pages for assessment {}: {}", assessment.getId(), ex.getMessage());
+    }
+  }
+
+  /** Persists wizard step 1–2 fields into {@code pdf_import_metadata_json} (same transaction as import). */
+  private void applyPdfImportMetadataJson(
+      Assessment assessment,
+      PdfAssessmentImportFormInput form,
+      PdfImportedExamDto exam,
+      String sourceFileName,
+      com.fptu.math_master.dto.response.AssessmentImportFormOptionsResponse importFormOptions) {
+    String gradeName = resolveSchoolGradeName(form);
+    String subjectName = resolveSubjectName(form);
+    String bankName = null;
+    if (form.questionBankId() != null) {
+      bankName =
+          questionBankRepository
+              .findById(form.questionBankId())
+              .map(QuestionBank::getName)
+              .orElse(null);
+    }
+    var metadata =
+        AssessmentPdfImportMetadataHelper.buildFromImport(
+            form,
+            exam,
+            sourceFileName,
+            gradeName,
+            subjectName,
+            bankName,
+            importFormOptions);
+    String json = AssessmentPdfImportMetadataHelper.toJson(metadata, objectMapper);
+    assessment.setPdfImportMetadataJson(json);
+    log.info(
+        "Stored PDF import wizard metadata for assessment {} ({} bytes)",
+        assessment.getId(),
+        json.length());
+  }
+
+  /** Merge wizardForm snapshot from preExtractedJson when multipart fields are missing. */
+  private PdfAssessmentImportFormInput enrichFormFromPreExtractedWizard(
+      PdfAssessmentImportFormInput form) {
+    if (form == null || form.preExtractedJson() == null || form.preExtractedJson().isBlank()) {
+      return form;
+    }
+    try {
+      var root = objectMapper.readTree(form.preExtractedJson());
+      var wizard = root.get("wizardForm");
+      if (wizard == null || !wizard.isObject()) {
+        return form;
+      }
+      var b = form.toBuilder();
+      if (isBlank(form.examTitle()) && wizard.hasNonNull("examTitle")) {
+        b.examTitle(wizard.get("examTitle").asText());
+      }
+      if (isBlank(form.schoolYear()) && wizard.hasNonNull("schoolYear")) {
+        b.schoolYear(wizard.get("schoolYear").asText());
+      }
+      if (isBlank(form.examType()) && wizard.hasNonNull("examType")) {
+        b.examType(wizard.get("examType").asText());
+      }
+      if (isBlank(form.examScope()) && wizard.hasNonNull("examScope")) {
+        b.examScope(wizard.get("examScope").asText());
+      }
+      if (isBlank(form.organizerType()) && wizard.hasNonNull("organizerType")) {
+        b.organizerType(wizard.get("organizerType").asText());
+      }
+      if (isBlank(form.provinceCity()) && wizard.hasNonNull("provinceCity")) {
+        b.provinceCity(wizard.get("provinceCity").asText());
+      }
+      if (isBlank(form.district()) && wizard.hasNonNull("district")) {
+        b.district(wizard.get("district").asText());
+      }
+      if (isBlank(form.schoolName()) && wizard.hasNonNull("schoolName")) {
+        b.schoolName(wizard.get("schoolName").asText());
+      }
+      if (isBlank(form.department()) && wizard.hasNonNull("department")) {
+        b.department(wizard.get("department").asText());
+      }
+      if (isBlank(form.organizerName()) && wizard.hasNonNull("organizerName")) {
+        b.organizerName(wizard.get("organizerName").asText());
+      }
+      if (isBlank(form.examDate()) && wizard.hasNonNull("examDate")) {
+        b.examDate(wizard.get("examDate").asText());
+      }
+      if (form.schoolGradeId() == null && wizard.hasNonNull("schoolGradeId")) {
+        b.schoolGradeId(UUID.fromString(wizard.get("schoolGradeId").asText()));
+      }
+      if (form.subjectId() == null && wizard.hasNonNull("subjectId")) {
+        b.subjectId(UUID.fromString(wizard.get("subjectId").asText()));
+      }
+      if (isBlank(form.contextHint()) && wizard.hasNonNull("contextHint")) {
+        b.contextHint(wizard.get("contextHint").asText());
+      }
+      if (form.questionBankId() == null && wizard.hasNonNull("questionBankId")) {
+        b.questionBankId(UUID.fromString(wizard.get("questionBankId").asText()));
+      }
+      if (form.timeLimitMinutes() == null && wizard.hasNonNull("timeLimitMinutes")) {
+        b.timeLimitMinutes(wizard.get("timeLimitMinutes").asInt());
+      }
+      if (isBlank(form.pdfLayout()) && wizard.hasNonNull("pdfLayout")) {
+        b.pdfLayout(wizard.get("pdfLayout").asText());
+      }
+      if (isBlank(form.importContentMode()) && wizard.hasNonNull("importContentMode")) {
+        b.importContentMode(wizard.get("importContentMode").asText());
+      }
+      return b.build();
+    } catch (Exception ex) {
+      log.warn("Could not merge wizardForm from preExtractedJson: {}", ex.getMessage());
+      return form;
+    }
+  }
+
+  private static boolean isBlank(String value) {
+    return value == null || value.isBlank();
+  }
+
+  private String resolveSchoolGradeName(PdfAssessmentImportFormInput form) {
+    if (form.schoolGradeId() != null) {
+      String fromDb =
+          schoolGradeRepository
+              .findById(form.schoolGradeId())
+              .map(SchoolGrade::getName)
+              .orElse(null);
+      if (fromDb != null && !fromDb.isBlank()) {
+        return fromDb;
+      }
+    }
+    return readWizardFormText(form, "schoolGradeName");
+  }
+
+  private String resolveSubjectName(PdfAssessmentImportFormInput form) {
+    if (form.subjectId() != null) {
+      String fromDb =
+          subjectRepository.findById(form.subjectId()).map(Subject::getName).orElse(null);
+      if (fromDb != null && !fromDb.isBlank()) {
+        return fromDb;
+      }
+    }
+    return readWizardFormText(form, "subjectName");
+  }
+
+  private String readWizardFormText(PdfAssessmentImportFormInput form, String field) {
+    if (form == null || form.preExtractedJson() == null || form.preExtractedJson().isBlank()) {
+      return null;
+    }
+    try {
+      var wizard = objectMapper.readTree(form.preExtractedJson()).get("wizardForm");
+      if (wizard != null && wizard.hasNonNull(field)) {
+        String text = wizard.get(field).asText();
+        return text != null && !text.isBlank() ? text.trim() : null;
+      }
+    } catch (Exception ignored) {
+      // optional snapshot
+    }
+    return null;
+  }
+
+  private void persistPdfImportDocument(
+      Assessment assessment, List<PdfImportPageDto> pages, String pdfLayout) {
+    if (pages.isEmpty()) {
+      return;
+    }
+    try {
+      var doc = AssessmentPdfImportDocumentHelper.seedFromPages(pages, pdfLayout);
+      assessment.setPdfImportDocumentJson(
+          AssessmentPdfImportDocumentHelper.toJson(doc, objectMapper));
+    } catch (Exception ex) {
+      log.warn(
+          "Could not serialize pdf import document for assessment {}: {}",
+          assessment.getId(),
+          ex.getMessage());
+    }
   }
 
   private void persistSourcePdfToMinio(
@@ -473,6 +735,10 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     if (parsed.getPageNumber() != null) {
       meta.put("pageNumber", parsed.getPageNumber());
     }
+    if (parsed.getSectionLabel() != null && !parsed.getSectionLabel().isBlank()) {
+      meta.put("sectionLabel", parsed.getSectionLabel());
+    }
+    meta.put("pageSource", Boolean.TRUE);
     if (exam != null) {
       meta.put("exam", objectMapper.convertValue(exam, new TypeReference<Map<String, Object>>() {}));
     }

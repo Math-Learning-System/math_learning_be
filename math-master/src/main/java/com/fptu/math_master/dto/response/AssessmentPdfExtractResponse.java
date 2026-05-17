@@ -1,5 +1,6 @@
 package com.fptu.math_master.dto.response;
 
+import com.fptu.math_master.dto.response.pdfimport.PdfImportPageDto;
 import com.fptu.math_master.dto.response.pdfimport.PdfImportedExamDto;
 import com.fptu.math_master.dto.response.pdfimport.PdfImportedQuestionDto;
 import java.util.List;
@@ -20,4 +21,7 @@ public class AssessmentPdfExtractResponse {
   private String extractedText;
   private PdfImportedExamDto exam;
   private List<PdfImportedQuestionDto> questions;
+  private List<PdfImportPageDto> pages;
+  /** When true, import only stores page OCR — teacher builds questions on detail page. */
+  private Boolean manualQuestionBuild;
 }

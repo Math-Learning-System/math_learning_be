@@ -13,8 +13,16 @@ import com.fptu.math_master.dto.request.PointsOverrideRequest;
 import com.fptu.math_master.dto.response.AssessmentGenerationResponse;
 import com.fptu.math_master.dto.response.AssessmentQuestionResponse;
 import com.fptu.math_master.configuration.properties.MinioProperties;
+import com.fptu.math_master.dto.request.UpdateAssessmentPdfImportDocumentRequest;
+import com.fptu.math_master.dto.request.UpdateAssessmentPdfImportMetadataRequest;
+import com.fptu.math_master.dto.response.AssessmentPdfImportDocumentResponse;
 import com.fptu.math_master.dto.response.AssessmentResponse;
 import com.fptu.math_master.dto.response.AssessmentSourcePdfUrlResponse;
+import com.fptu.math_master.dto.response.pdfimport.PdfImportPageDto;
+import com.fptu.math_master.entity.SchoolGrade;
+import com.fptu.math_master.service.AssessmentImportConfigService;
+import com.fptu.math_master.service.AssessmentPdfImportDocumentHelper;
+import com.fptu.math_master.service.AssessmentPdfImportMetadataHelper;
 import com.fptu.math_master.dto.response.AssessmentSummary;
 import com.fptu.math_master.dto.response.CognitiveLevelDistributionResponse;
 import com.fptu.math_master.dto.response.DistributeAssessmentPointsResponse;
@@ -54,6 +62,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 import com.fptu.math_master.util.SecurityUtils;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
 import lombok.experimental.FieldDefaults;
@@ -76,6 +85,9 @@ public class AssessmentServiceImpl implements AssessmentService {
 
   private static final String UNKNOWN_NAME = "Unknown";
 
+  ObjectMapper objectMapper;
+  AssessmentImportConfigService assessmentImportConfigService;
+  com.fptu.math_master.repository.SchoolGradeRepository schoolGradeRepository;
   AssessmentRepository assessmentRepository;
   AssessmentLessonRepository assessmentLessonRepository;
   AssessmentQuestionRepository assessmentQuestionRepository;
@@ -585,6 +597,118 @@ public class AssessmentServiceImpl implements AssessmentService {
 
   @Override
   @Transactional(readOnly = true)
+  public AssessmentPdfImportDocumentResponse getPdfImportDocument(UUID id) {
+    Assessment assessment = loadAssessmentOrThrow(id);
+    validateOwnerOrAdmin(assessment.getTeacherId(), getCurrentUserId());
+    if (!StringUtils.hasText(assessment.getSourcePdfPath())
+        && !StringUtils.hasText(assessment.getPdfImportPagesJson())) {
+      throw new AppException(
+          ErrorCode.INVALID_REQUEST, "Đề này không có dữ liệu import PDF để rà soát.");
+    }
+    String json = assessment.getPdfImportDocumentJson();
+    if (StringUtils.hasText(json)) {
+      return AssessmentPdfImportDocumentHelper.parseDocumentJson(json, objectMapper);
+    }
+    List<PdfImportPageDto> pages = parsePdfImportPages(assessment.getPdfImportPagesJson());
+    if (pages.isEmpty()) {
+      return AssessmentPdfImportDocumentHelper.emptyDocument();
+    }
+    return AssessmentPdfImportDocumentHelper.seedFromPages(pages, null);
+  }
+
+  @Override
+  @Transactional
+  public AssessmentPdfImportDocumentResponse updatePdfImportDocument(
+      UUID id, UpdateAssessmentPdfImportDocumentRequest request) {
+    if (!canEditAssessment(id)) {
+      throw new AppException(ErrorCode.UNAUTHORIZED, "Không thể chỉnh sửa đề ở trạng thái hiện tại.");
+    }
+    Assessment assessment = loadAssessmentOrThrow(id);
+    validateOwnerOrAdmin(assessment.getTeacherId(), getCurrentUserId());
+    AssessmentPdfImportDocumentResponse doc =
+        AssessmentPdfImportDocumentResponse.builder()
+            .questionBlocks(
+                request.getQuestionBlocks() != null
+                    ? request.getQuestionBlocks()
+                    : List.of())
+            .answerBlocks(
+                request.getAnswerBlocks() != null ? request.getAnswerBlocks() : List.of())
+            .build();
+    assessment.setPdfImportDocumentJson(
+        AssessmentPdfImportDocumentHelper.toJson(doc, objectMapper));
+    assessmentRepository.save(assessment);
+    return doc;
+  }
+
+  @Override
+  @Transactional
+  public AssessmentResponse updatePdfImportMetadata(
+      UUID id, UpdateAssessmentPdfImportMetadataRequest request) {
+    if (!canEditAssessment(id)) {
+      throw new AppException(ErrorCode.UNAUTHORIZED, "Không thể chỉnh sửa đề ở trạng thái hiện tại.");
+    }
+    Assessment assessment = loadAssessmentOrThrow(id);
+    validateOwnerOrAdmin(assessment.getTeacherId(), getCurrentUserId());
+    if (!StringUtils.hasText(assessment.getSourcePdfPath())) {
+      throw new AppException(ErrorCode.INVALID_KEY, "Đề này không phải import từ PDF.");
+    }
+
+    var existing =
+        AssessmentPdfImportMetadataHelper.parseMetadataJson(
+            assessment.getPdfImportMetadataJson(), objectMapper);
+    if (existing == null) {
+      existing = AssessmentPdfImportMetadataHelper.buildFallbackFromAssessment(assessment);
+    }
+
+    String gradeName = null;
+    if (request.getSchoolGradeId() != null) {
+      gradeName =
+          schoolGradeRepository
+              .findById(request.getSchoolGradeId())
+              .map(SchoolGrade::getName)
+              .orElse(null);
+    }
+    String subjectName = null;
+    if (request.getSubjectId() != null) {
+      subjectName =
+          subjectRepository.findById(request.getSubjectId()).map(Subject::getName).orElse(null);
+    }
+    String bankName = null;
+    if (request.getQuestionBankId() != null) {
+      bankName =
+          questionBankRepository
+              .findById(request.getQuestionBankId())
+              .map(QuestionBank::getName)
+              .orElse(null);
+    }
+
+    var merged =
+        AssessmentPdfImportMetadataHelper.mergeUpdate(
+            existing,
+            request,
+            assessmentImportConfigService.getFormOptions(),
+            gradeName,
+            subjectName,
+            bankName);
+    assessment.setPdfImportMetadataJson(
+        AssessmentPdfImportMetadataHelper.toJson(merged, objectMapper));
+
+    if (request.getExamTitle() != null && !request.getExamTitle().isBlank()) {
+      assessment.setTitle(request.getExamTitle().trim());
+    }
+    if (request.getTimeLimitMinutes() != null) {
+      assessment.setTimeLimitMinutes(request.getTimeLimitMinutes());
+    }
+    if (request.getAssessmentType() != null) {
+      assessment.setAssessmentType(request.getAssessmentType());
+    }
+
+    assessment = assessmentRepository.save(assessment);
+    return mapToResponse(assessment);
+  }
+
+  @Override
+  @Transactional(readOnly = true)
   public Page<AssessmentResponse> getMyAssessments(AssessmentStatus status, String search, Pageable pageable) {
 
     UUID currentUserId = getCurrentUserId();
@@ -761,10 +885,16 @@ public class AssessmentServiceImpl implements AssessmentService {
               BigDecimal effectivePoints =
                   aq.getPointsOverride() != null ? aq.getPointsOverride() : question.getPoints();
 
+              Map<String, Object> genMeta = question.getGenerationMetadata();
+              Integer pageNumber = readMetaInt(genMeta, "pageNumber");
+              String sectionLabel = readMetaString(genMeta, "sectionLabel");
+              Boolean pageSource = readMetaBoolean(genMeta, "pageSource");
+
               return AssessmentQuestionResponse.builder()
                   .questionId(question.getId())
                   .orderIndex(aq.getOrderIndex())
                   .points(effectivePoints)
+                  .pointsOverride(aq.getPointsOverride())
                   .questionType(question.getQuestionType())
                   .questionText(question.getQuestionText())
                   .options(question.getOptions())
@@ -775,6 +905,9 @@ public class AssessmentServiceImpl implements AssessmentService {
                   .tags(question.getTags())
                   .cognitiveLevel(question.getCognitiveLevel())
                   .createdAt(question.getCreatedAt())
+                  .pageNumber(pageNumber)
+                  .sectionLabel(sectionLabel)
+                  .pageSource(pageSource)
                   .build();
             })
         .toList();
@@ -1273,7 +1406,104 @@ public class AssessmentServiceImpl implements AssessmentService {
         .updatedAt(assessment.getUpdatedAt())
         .sourcePdfPath(assessment.getSourcePdfPath())
         .sourcePdfOriginalName(assessment.getSourcePdfOriginalName())
+        .pdfImportPages(parsePdfImportPages(assessment.getPdfImportPagesJson()))
+        .pdfImportDocument(resolvePdfImportDocumentForResponse(assessment))
+        .pdfImportMetadata(resolvePdfImportMetadataForResponse(assessment))
         .build();
+  }
+
+  private com.fptu.math_master.dto.response.AssessmentPdfImportMetadataResponse
+      resolvePdfImportMetadataForResponse(Assessment assessment) {
+    var parsed =
+        AssessmentPdfImportMetadataHelper.parseMetadataJson(
+            assessment.getPdfImportMetadataJson(), objectMapper);
+    if (parsed != null) {
+      return parsed;
+    }
+    if (!StringUtils.hasText(assessment.getSourcePdfPath())) {
+      return null;
+    }
+    return AssessmentPdfImportMetadataHelper.buildFallbackFromAssessment(assessment);
+  }
+
+  private AssessmentPdfImportDocumentResponse resolvePdfImportDocumentForResponse(
+      Assessment assessment) {
+    String json = assessment.getPdfImportDocumentJson();
+    if (StringUtils.hasText(json)) {
+      return AssessmentPdfImportDocumentHelper.parseDocumentJson(json, objectMapper);
+    }
+    List<PdfImportPageDto> pages = parsePdfImportPages(assessment.getPdfImportPagesJson());
+    if (pages.isEmpty()) {
+      return null;
+    }
+    return AssessmentPdfImportDocumentHelper.seedFromPages(pages, null);
+  }
+
+  private static Integer readMetaInt(Map<String, Object> meta, String key) {
+    if (meta == null || !meta.containsKey(key)) {
+      return null;
+    }
+    Object v = meta.get(key);
+    if (v instanceof Number n) {
+      return n.intValue();
+    }
+    try {
+      return Integer.parseInt(String.valueOf(v));
+    } catch (NumberFormatException ex) {
+      return null;
+    }
+  }
+
+  private static String readMetaString(Map<String, Object> meta, String key) {
+    if (meta == null || !meta.containsKey(key)) {
+      return null;
+    }
+    Object v = meta.get(key);
+    return v != null ? String.valueOf(v) : null;
+  }
+
+  private static Boolean readMetaBoolean(Map<String, Object> meta, String key) {
+    if (meta == null || !meta.containsKey(key)) {
+      return null;
+    }
+    Object v = meta.get(key);
+    if (v instanceof Boolean b) {
+      return b;
+    }
+    return Boolean.parseBoolean(String.valueOf(v));
+  }
+
+  private List<com.fptu.math_master.dto.response.pdfimport.PdfImportPageDto> parsePdfImportPages(
+      String json) {
+    if (json == null || json.isBlank()) {
+      return List.of();
+    }
+    try {
+      com.fasterxml.jackson.databind.ObjectMapper mapper =
+          new com.fasterxml.jackson.databind.ObjectMapper();
+      com.fasterxml.jackson.databind.JsonNode root = mapper.readTree(json);
+      com.fasterxml.jackson.databind.JsonNode pages = root.get("pages");
+      if (pages == null || !pages.isArray()) {
+        return List.of();
+      }
+      List<com.fptu.math_master.dto.response.pdfimport.PdfImportPageDto> out = new ArrayList<>();
+      for (com.fasterxml.jackson.databind.JsonNode node : pages) {
+        out.add(
+            com.fptu.math_master.dto.response.pdfimport.PdfImportPageDto.builder()
+                .pageNumber(
+                    node.has("pageNumber") ? node.get("pageNumber").asInt() : null)
+                .text(node.has("text") ? node.get("text").asText() : null)
+                .sectionLabel(
+                    node.has("sectionLabel") ? node.get("sectionLabel").asText() : null)
+                .confidence(
+                    node.has("confidence") ? node.get("confidence").asDouble() : null)
+                .build());
+      }
+      return out;
+    } catch (Exception ex) {
+      log.warn("Invalid pdf_import_pages_json: {}", ex.getMessage());
+      return List.of();
+    }
   }
 
   private ExamMatrix validateAndGetAccessibleMatrix(UUID matrixId, UUID currentUserId) {

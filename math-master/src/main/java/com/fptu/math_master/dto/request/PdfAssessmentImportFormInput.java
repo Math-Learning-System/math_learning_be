@@ -5,7 +5,7 @@ import java.util.UUID;
 import lombok.Builder;
 
 /** Teacher-provided metadata before PDF AI extraction. */
-@Builder
+@Builder(toBuilder = true)
 public record PdfAssessmentImportFormInput(
     String examTitle,
     String schoolYear,
