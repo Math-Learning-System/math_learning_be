@@ -22,8 +22,8 @@ spring:
   jpa:
     open-in-view: false
     hibernate:
-      # Creates/updates tables from JPA entities on empty local DB.
-      # Production uses ddl-auto: none + Flyway only.
+      # Empty DB: Hibernate creates base tables (Flyway skipped until tables exist).
+      # Existing DB: Flyway applies db/migration, then Hibernate patches entity drift.
       ddl-auto: update
     properties:
       hibernate:
@@ -31,10 +31,14 @@ spring:
         format_sql: true
     show-sql: false
 
-  # Flyway is off locally: Hibernate builds the base schema first.
-  # Incremental SQL in db/migration runs on prod via Flyway.
   flyway:
-    enabled: false
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+    # PostgreSQL dollar-quotes in V11/V28/V29 use $tag${...}; disable ${} placeholder parsing.
+    placeholder-replacement: false
 
   data:
     redis:

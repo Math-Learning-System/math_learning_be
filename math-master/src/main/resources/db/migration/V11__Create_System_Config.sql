@@ -121,8 +121,8 @@ VALUES (
       "footer": "Chúng tôi sẽ phản hồi trong vòng 5 ngày làm việc kể từ khi nhận được yêu cầu của bạn."
     }
   ],
-  "contactEmail": "privacy@mathmaster.vn",
-  "contactWebsite": "mathmaster.vn",
+  "contactEmail": "dangkhoipham80@gmail.com",
+  "contactWebsite": "https://mathmaster.vn",
   "responseTime": "5 ngày làm việc"
 }$policy$,
     'Nội dung chính sách bảo mật hiển thị khi người dùng đăng ký tài khoản',

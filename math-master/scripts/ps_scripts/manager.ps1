@@ -130,6 +130,95 @@ function Test-LocalPostgresReady {
     return $true
 }
 
+function Get-LocalDbConnectionInfo {
+    param([string]$Root)
+    Import-ProjectEnvFile $Root | Out-Null
+    $port = 5432
+    $dbName = "math_learning"
+    $dbUser = "math_learning"
+    $jdbcUrl = $env:SPRING_DATASOURCE_URL
+    if (-not $jdbcUrl) { $jdbcUrl = "jdbc:postgresql://localhost:5432/$dbName" }
+    if ($jdbcUrl -match 'jdbc:postgresql://[^:/]+:(\d+)/([^?]+)') {
+        $port = [int]$matches[1]
+        $dbName = $matches[2]
+    }
+    if ($env:SPRING_DATASOURCE_USERNAME) { $dbUser = $env:SPRING_DATASOURCE_USERNAME }
+    return @{
+        Port     = $port
+        Database = $dbName
+        User     = $dbUser
+        Password = $env:SPRING_DATASOURCE_PASSWORD
+        JdbcUrl  = $jdbcUrl
+    }
+}
+
+function Test-LocalDbHasApplicationTables {
+    param($Conn)
+    $psql = Get-Command psql -ErrorAction SilentlyContinue
+    if (-not $psql) { return $null }
+    $env:PGPASSWORD = $Conn.Password
+    $sql = @"
+SELECT COUNT(*)::int FROM information_schema.tables
+WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+AND table_name <> 'flyway_schema_history';
+"@
+    $count = & psql -h localhost -p $Conn.Port -U $Conn.User -d $Conn.Database -tAc $sql 2>&1
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return ([int]($count.ToString().Trim()) -gt 0)
+}
+
+function Test-LocalFlywayFailedMigration {
+    param($Conn)
+    $psql = Get-Command psql -ErrorAction SilentlyContinue
+    if (-not $psql) { return 0 }
+    $env:PGPASSWORD = $Conn.Password
+    $sql = "SELECT COUNT(*)::int FROM flyway_schema_history WHERE success = false;"
+    $count = & psql -h localhost -p $Conn.Port -U $Conn.User -d $Conn.Database -tAc $sql 2>&1
+    if ($LASTEXITCODE -ne 0) { return 0 }
+    return [int]($count.ToString().Trim())
+}
+
+function Invoke-LocalFlywayMigrate {
+    param([string]$Root)
+    $conn = Get-LocalDbConnectionInfo $Root
+    $hasTables = Test-LocalDbHasApplicationTables $conn
+
+    if ($hasTables -eq $false) {
+        Write-Step "Empty database — Flyway deferred (Hibernate creates base schema on first start)."
+        return $true
+    }
+
+    if ($hasTables -eq $null) {
+        Write-Host "WARN: psql unavailable; Flyway will run when Spring Boot starts." -ForegroundColor Yellow
+        return $true
+    }
+
+    $flywayProps = @(
+        "-Dflyway.url=$($conn.JdbcUrl)",
+        "-Dflyway.user=$($conn.User)",
+        "-Dflyway.password=$($conn.Password)",
+        "-Dflyway.placeholderReplacement=false"
+    )
+
+    $failed = Test-LocalFlywayFailedMigration $conn
+    if ($failed -gt 0) {
+        Write-Step "Flyway: repairing $failed failed migration record(s)..."
+        & .\mvnw.cmd -q flyway:repair @flywayProps 2>&1 | Out-Null
+    }
+
+    Write-Step "Flyway: applying pending migrations (db/migration)..."
+    $flywayArgs = @("-q", "flyway:info", "flyway:migrate") + $flywayProps
+    & .\mvnw.cmd @flywayArgs 2>&1 | Where-Object {
+        $_ -notmatch "Downloading|Downloaded" -and $_ -notmatch "^\s*$"
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Flyway migrate failed. See output above."
+        return $false
+    }
+    Write-OK "Database schema up to date (Flyway)."
+    return $true
+}
+
 function Assert-Docker {
     try {
         docker info 2>&1 | Out-Null
@@ -288,9 +377,11 @@ function Invoke-CleanBuildStart {
     if ($LASTEXITCODE -ne 0) { Write-Err "Build failed."; Pop-Location; return }
     Write-OK "Build successful."
 
+    if (-not (Invoke-LocalFlywayMigrate $root)) { Pop-Location; return }
+
     Stop-AppPort -Port 8080
 
-    Write-Step "Starting Spring Boot (profile local, Hibernate creates tables on first run)..."
+    Write-Step "Starting Spring Boot (profile local, Flyway + Hibernate)..."
     Write-Host "  API: http://localhost:8080  |  Ctrl+C to stop" -ForegroundColor Gray
     Write-Host ""
     & .\mvnw.cmd spring-boot:run
@@ -467,7 +558,7 @@ function Show-MainMenu {
     Write-Host ""
     Write-Host "  Math Master Manager (local dev)" -ForegroundColor Cyan
     Write-Host ("  " + "-" * 35) -ForegroundColor DarkCyan
-    Write-Host "  [4]  Clean Build + Start Project  (main)" -ForegroundColor Green
+    Write-Host "  [4]  Clean Build + Start (+ Flyway migrate)" -ForegroundColor Green
     Write-Host "  [5]  Setup Local DB (pgAdmin / psql)" -ForegroundColor Yellow
     Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
     Write-Host "  [1]  Format Code (Spotless)" -ForegroundColor White

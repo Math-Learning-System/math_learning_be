@@ -91,6 +91,14 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     assessmentImportConfigService.assertExamScopeAllowed(form.examScope());
     assessmentImportConfigService.assertOrganizerTypeAllowed(form.organizerType());
     assessmentImportConfigService.assertProvinceCityAllowed(form.provinceCity());
+    assessmentImportConfigService.assertPdfLayoutAllowed(form.pdfLayout());
+    assessmentImportConfigService.assertImportContentModeAllowed(form.importContentMode());
+
+    if ("latex".equalsIgnoreCase(form.importContentMode())) {
+      throw new AppException(
+          ErrorCode.INVALID_KEY,
+          "Chế độ chuyển LaTeX đang được phát triển. Vui lòng chọn xử lý PDF.");
+    }
 
     if (!templateImportService.validateFile(file)) {
       throw new AppException(
@@ -114,7 +122,7 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     }
 
     ParsedExamPayload payload =
-        analyzeExamWithAI(extractedText, subjectHint, contextHint, sourceFile);
+        analyzeExamWithAI(extractedText, subjectHint, contextHint, sourceFile, form.pdfLayout());
     PdfImportedExamDto exam = mergeExamWithForm(payload.exam(), form, sourceFile);
     List<PdfImportedQuestionDto> questions = payload.questions();
 
@@ -192,7 +200,8 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
                 .solutionSteps(parsed.getSolution())
                 .diagramData(buildDiagramPayload(parsed))
                 .generationMetadata(
-                    buildQuestionGenerationMetadata(exam, parsed, assessment.getId(), sourceFile))
+                    buildQuestionGenerationMetadata(
+                        exam, parsed, assessment.getId(), sourceFile, form))
                 .build();
 
         QuestionResponse created = questionService.createQuestion(createRequest);
@@ -246,9 +255,9 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
   }
 
   private ParsedExamPayload analyzeExamWithAI(
-      String text, String subjectHint, String contextHint, String sourceFile) {
+      String text, String subjectHint, String contextHint, String sourceFile, String pdfLayout) {
     try {
-      String prompt = buildExamAnalysisPrompt(text, subjectHint, contextHint);
+      String prompt = buildExamAnalysisPrompt(text, subjectHint, contextHint, pdfLayout);
       String aiResponse = geminiService.sendMessage(prompt);
       return parseExamAnalysis(aiResponse, text, sourceFile);
     } catch (Exception ex) {
@@ -257,12 +266,28 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     }
   }
 
-  private String buildExamAnalysisPrompt(String text, String subjectHint, String contextHint) {
+  private String buildExamAnalysisPrompt(
+      String text, String subjectHint, String contextHint, String pdfLayout) {
     StringBuilder prompt = new StringBuilder();
     prompt.append("# ROLE\n");
     prompt.append(
         "You are a Vietnamese mathematics exam PDF parser. Split data into EXAM-level fields and QUESTION-level fields.\n");
     prompt.append("Output ONLY valid JSON (no markdown fences).\n\n");
+    prompt.append("# PDF DOCUMENT LAYOUT\n");
+    if ("questions_with_answers".equals(pdfLayout)) {
+      prompt.append(
+          "Layout: QUESTIONS_WITH_ANSWERS — the PDF contains exam questions AND a separate answer key and/or solutions section (often at the end).\n");
+      prompt.append(
+          "- Extract answer_key and solution for each question when present in the answer section.\n");
+      prompt.append(
+          "- Map answers to the correct question by label (Câu I.1, Câu 2, …). Do not guess.\n");
+    } else {
+      prompt.append(
+          "Layout: QUESTIONS_ONLY — the PDF contains exam questions only (no dedicated answer key section).\n");
+      prompt.append(
+          "- Omit answer_key and solution unless clearly stated inline with the question.\n");
+    }
+    prompt.append("\n");
     prompt.append("# EXAM-LEVEL FIELDS (object \"exam\")\n");
     prompt.append(
         "exam_title, school_year, department (legacy), subject, exam_date, duration_minutes, ");
@@ -631,11 +656,20 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
       PdfImportedExamDto exam,
       PdfImportedQuestionDto parsed,
       UUID assessmentId,
-      String sourceFile) {
+      String sourceFile,
+      PdfAssessmentImportFormInput form) {
     Map<String, Object> meta = new LinkedHashMap<>();
     meta.put("source", PDF_IMPORT_SOURCE);
     meta.put("assessmentId", assessmentId.toString());
     meta.put("sourceFile", sourceFile);
+    if (form != null) {
+      if (form.pdfLayout() != null && !form.pdfLayout().isBlank()) {
+        meta.put("pdfLayout", form.pdfLayout());
+      }
+      if (form.importContentMode() != null && !form.importContentMode().isBlank()) {
+        meta.put("importContentMode", form.importContentMode());
+      }
+    }
     if (parsed.getPageNumber() != null) {
       meta.put("pageNumber", parsed.getPageNumber());
     }

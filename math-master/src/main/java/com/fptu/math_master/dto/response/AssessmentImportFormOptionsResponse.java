@@ -23,4 +23,8 @@ public class AssessmentImportFormOptionsResponse {
   /** e.g. VN_34_PROVINCES_2025 */
   private String adminVersion;
   private String country;
+  /** Admin-configured PDF document shapes (questions only vs questions + answers). */
+  private List<CodeLabelOption> pdfLayouts;
+  /** How to process uploaded content: pdf (active) or latex (future). */
+  private List<CodeLabelOption> importContentModes;
 }

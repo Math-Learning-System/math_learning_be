@@ -255,6 +255,20 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
 
+            <plugin>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-maven-plugin</artifactId>
+                <configuration>
+                    <locations>
+                        <location>filesystem:src/main/resources/db/migration</location>
+                    </locations>
+                    <baselineOnMigrate>true</baselineOnMigrate>
+                    <baselineVersion>0</baselineVersion>
+                    <validateOnMigrate>true</validateOnMigrate>
+                    <placeholderReplacement>false</placeholderReplacement>
+                </configuration>
+            </plugin>
+
             <!-- Optional: Spotless formatting plugin kept minimal -->
             <plugin>
                 <groupId>com.diffplug.spotless</groupId>

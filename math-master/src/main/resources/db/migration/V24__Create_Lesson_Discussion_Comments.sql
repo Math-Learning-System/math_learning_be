@@ -1,4 +1,4 @@
-CREATE TABLE lesson_discussion_comments (
+CREATE TABLE IF NOT EXISTS lesson_discussion_comments (
     id UUID PRIMARY KEY,
     created_at TIMESTAMP NOT NULL,
     created_by UUID,
@@ -24,13 +24,13 @@ CREATE TABLE lesson_discussion_comments (
         FOREIGN KEY (parent_id) REFERENCES lesson_discussion_comments(id)
 );
 
-CREATE INDEX idx_lesson_discussion_comments_course_lesson
+CREATE INDEX IF NOT EXISTS idx_lesson_discussion_comments_course_lesson
     ON lesson_discussion_comments(course_lesson_id, created_at DESC);
 
-CREATE INDEX idx_lesson_discussion_comments_parent
+CREATE INDEX IF NOT EXISTS idx_lesson_discussion_comments_parent
     ON lesson_discussion_comments(parent_id, created_at ASC);
 
-CREATE TABLE lesson_discussion_comment_likes (
+CREATE TABLE IF NOT EXISTS lesson_discussion_comment_likes (
     id UUID PRIMARY KEY,
     created_at TIMESTAMP NOT NULL,
     created_by UUID,
@@ -48,5 +48,5 @@ CREATE TABLE lesson_discussion_comment_likes (
         UNIQUE (comment_id, user_id)
 );
 
-CREATE INDEX idx_lesson_discussion_comment_likes_comment
+CREATE INDEX IF NOT EXISTS idx_lesson_discussion_comment_likes_comment
     ON lesson_discussion_comment_likes(comment_id);

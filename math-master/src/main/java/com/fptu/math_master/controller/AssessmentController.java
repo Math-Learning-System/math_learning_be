@@ -92,7 +92,9 @@ public class AssessmentController {
       @RequestParam(required = false) String contextHint,
       @RequestParam(required = false) UUID questionBankId,
       @RequestParam(required = false) AssessmentType assessmentType,
-      @RequestParam(required = false) Integer timeLimitMinutes) {
+      @RequestParam(required = false) Integer timeLimitMinutes,
+      @RequestParam(required = false) String pdfLayout,
+      @RequestParam(required = false) String importContentMode) {
     log.info("REST request to import assessment from PDF: {}", file.getOriginalFilename());
     com.fptu.math_master.dto.request.PdfAssessmentImportFormInput form =
         com.fptu.math_master.dto.request.PdfAssessmentImportFormInput.builder()
@@ -114,6 +116,8 @@ public class AssessmentController {
             .questionBankId(questionBankId)
             .assessmentType(assessmentType)
             .timeLimitMinutes(timeLimitMinutes)
+            .pdfLayout(pdfLayout)
+            .importContentMode(importContentMode)
             .build();
     AssessmentImportResponse response = assessmentImportService.importAssessmentFromPdf(file, form);
     return ApiResponse.<AssessmentImportResponse>builder()

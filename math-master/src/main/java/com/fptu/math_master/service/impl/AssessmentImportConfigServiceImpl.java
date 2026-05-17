@@ -48,6 +48,8 @@ public class AssessmentImportConfigServiceImpl implements AssessmentImportConfig
       validateExamScopes(readCodeLabels(root.path("examScopes")));
       validateOrganizerTypes(readCodeLabels(root.path("organizerTypes")));
       validateProvinceCities(readProvinceCities(root.path("provinceCities")));
+      validatePdfLayouts(readCodeLabels(root.path("pdfLayouts")));
+      validateImportContentModes(readCodeLabels(root.path("importContentModes")));
       requireNonBlankText(root.path("adminVersion"), "adminVersion");
       requireNonBlankText(root.path("country"), "country");
     } catch (AppException ex) {
@@ -128,6 +130,41 @@ public class AssessmentImportConfigServiceImpl implements AssessmentImportConfig
     }
   }
 
+  @Override
+  public void assertPdfLayoutAllowed(String pdfLayout) {
+    if (pdfLayout == null || pdfLayout.isBlank()) {
+      throw new AppException(ErrorCode.INVALID_KEY, "Vui lòng chọn dạng PDF");
+    }
+    String id = pdfLayout.trim();
+    boolean ok = loadOptions().getPdfLayouts().stream().anyMatch(o -> o.getId().equals(id));
+    if (!ok) {
+      throw new AppException(ErrorCode.INVALID_KEY, "Dạng PDF không hợp lệ");
+    }
+  }
+
+  @Override
+  public void assertImportContentModeAllowed(String importContentMode) {
+    if (importContentMode == null || importContentMode.isBlank()) {
+      throw new AppException(ErrorCode.INVALID_KEY, "Vui lòng chọn cách xử lý nội dung");
+    }
+    String id = importContentMode.trim();
+    CodeLabelOption match =
+        loadOptions().getImportContentModes().stream()
+            .filter(o -> o.getId().equals(id))
+            .findFirst()
+            .orElse(null);
+    if (match == null) {
+      throw new AppException(ErrorCode.INVALID_KEY, "Cách xử lý nội dung không hợp lệ");
+    }
+    if (Boolean.FALSE.equals(match.getEnabled())) {
+      throw new AppException(
+          ErrorCode.INVALID_KEY,
+          "Chế độ \""
+              + match.getLabel()
+              + "\" chưa được bật. Vui lòng chọn chế độ khác hoặc liên hệ admin.");
+    }
+  }
+
   private AssessmentImportFormOptionsResponse loadOptions() {
     JsonNode root =
         systemConfigRepository
@@ -158,6 +195,9 @@ public class AssessmentImportConfigServiceImpl implements AssessmentImportConfig
           validateProvinceCities(readProvinceCities(root.path("provinceCities")));
       String adminVersion = requireNonBlankText(root.path("adminVersion"), "adminVersion");
       String country = requireNonBlankText(root.path("country"), "country");
+      List<CodeLabelOption> pdfLayouts = validatePdfLayouts(readCodeLabels(root.path("pdfLayouts")));
+      List<CodeLabelOption> importContentModes =
+          validateImportContentModes(readCodeLabels(root.path("importContentModes")));
 
       return AssessmentImportFormOptionsResponse.builder()
           .schoolYears(schoolYears)
@@ -168,6 +208,8 @@ public class AssessmentImportConfigServiceImpl implements AssessmentImportConfig
           .provinceCities(provinceCities)
           .adminVersion(adminVersion)
           .country(country)
+          .pdfLayouts(pdfLayouts)
+          .importContentModes(importContentModes)
           .build();
     } catch (AppException ex) {
       throw ex;
@@ -187,8 +229,19 @@ public class AssessmentImportConfigServiceImpl implements AssessmentImportConfig
           String label = item.path("label").asText("").trim();
           if (!id.isEmpty() && !label.isEmpty()) {
             List<String> fields = readStringList(item.path("fields"));
+            String description = item.path("description").asText("").trim();
+            Boolean enabled =
+                item.has("enabled") && !item.path("enabled").isNull()
+                    ? item.path("enabled").asBoolean(true)
+                    : null;
             result.add(
-                CodeLabelOption.builder().id(id).label(label).fields(fields.isEmpty() ? null : fields).build());
+                CodeLabelOption.builder()
+                    .id(id)
+                    .label(label)
+                    .fields(fields.isEmpty() ? null : fields)
+                    .description(description.isEmpty() ? null : description)
+                    .enabled(enabled)
+                    .build());
           }
         });
     return result;
@@ -238,6 +291,40 @@ public class AssessmentImportConfigServiceImpl implements AssessmentImportConfig
       }
     }
     return types;
+  }
+
+  private List<CodeLabelOption> validatePdfLayouts(List<CodeLabelOption> layouts) {
+    if (layouts == null || layouts.isEmpty()) {
+      throw new AppException(ErrorCode.INVALID_KEY, "Phải có ít nhất một dạng PDF");
+    }
+    Set<String> seen = new HashSet<>();
+    for (CodeLabelOption o : layouts) {
+      if (!seen.add(o.getId())) {
+        throw new AppException(ErrorCode.INVALID_KEY, "Dạng PDF bị trùng: " + o.getId());
+      }
+    }
+    return layouts;
+  }
+
+  private List<CodeLabelOption> validateImportContentModes(List<CodeLabelOption> modes) {
+    if (modes == null || modes.isEmpty()) {
+      throw new AppException(ErrorCode.INVALID_KEY, "Phải có ít nhất một chế độ xử lý nội dung");
+    }
+    Set<String> seen = new HashSet<>();
+    boolean anyEnabled = false;
+    for (CodeLabelOption o : modes) {
+      if (!seen.add(o.getId())) {
+        throw new AppException(ErrorCode.INVALID_KEY, "Chế độ nội dung bị trùng: " + o.getId());
+      }
+      if (!Boolean.FALSE.equals(o.getEnabled())) {
+        anyEnabled = true;
+      }
+    }
+    if (!anyEnabled) {
+      throw new AppException(
+          ErrorCode.INVALID_KEY, "Phải có ít nhất một chế độ xử lý nội dung được bật (enabled)");
+    }
+    return modes;
   }
 
   private List<ProvinceCityOption> validateProvinceCities(List<ProvinceCityOption> cities) {

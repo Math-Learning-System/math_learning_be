@@ -23,6 +23,10 @@ public interface AssessmentImportConfigService {
 
   void assertProvinceCityAllowed(String provinceCity);
 
+  void assertPdfLayoutAllowed(String pdfLayout);
+
+  void assertImportContentModeAllowed(String importContentMode);
+
   /** municipality | province, or null if unknown. */
   String resolveProvinceCityType(String provinceCityName);
 }

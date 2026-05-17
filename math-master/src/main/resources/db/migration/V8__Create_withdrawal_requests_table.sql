@@ -1,7 +1,8 @@
 -- V8__Create_withdrawal_requests_table.sql
 -- Creates the withdrawal_requests table for the manual withdrawal feature.
+-- Idempotent: safe when Hibernate or a prior run already created the table.
 
-CREATE TABLE withdrawal_requests (
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
     withdrawal_request_id UUID         NOT NULL DEFAULT gen_random_uuid(),
     wallet_id             UUID         NOT NULL,
     user_id               UUID         NOT NULL,
@@ -31,8 +32,8 @@ CREATE TABLE withdrawal_requests (
 );
 
 -- Indexes for common query patterns
-CREATE INDEX idx_wr_user_id        ON withdrawal_requests(user_id);
-CREATE INDEX idx_wr_wallet_id      ON withdrawal_requests(wallet_id);
-CREATE INDEX idx_wr_status         ON withdrawal_requests(status);
-CREATE INDEX idx_wr_otp_expiry     ON withdrawal_requests(otp_expiry) WHERE status = 'PENDING_VERIFY';
-CREATE INDEX idx_wr_user_status    ON withdrawal_requests(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_wr_user_id        ON withdrawal_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_wr_wallet_id      ON withdrawal_requests(wallet_id);
+CREATE INDEX IF NOT EXISTS idx_wr_status         ON withdrawal_requests(status);
+CREATE INDEX IF NOT EXISTS idx_wr_otp_expiry     ON withdrawal_requests(otp_expiry) WHERE status = 'PENDING_VERIFY';
+CREATE INDEX IF NOT EXISTS idx_wr_user_status    ON withdrawal_requests(user_id, status);

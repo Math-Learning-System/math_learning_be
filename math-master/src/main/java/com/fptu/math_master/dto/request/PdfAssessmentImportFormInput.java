@@ -25,4 +25,8 @@ public record PdfAssessmentImportFormInput(
     String provinceCity,
     String district,
     String schoolName,
-    String country) {}
+    String country,
+    /** Admin-configured id: questions_only | questions_with_answers */
+    String pdfLayout,
+    /** Admin-configured id: pdf | latex */
+    String importContentMode) {}

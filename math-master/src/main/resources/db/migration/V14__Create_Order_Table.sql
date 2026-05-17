@@ -54,7 +54,7 @@ BEGIN
         ALTER TABLE transactions ADD COLUMN order_id UUID;
         ALTER TABLE transactions ADD CONSTRAINT fk_transactions_order
             FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL;
-        CREATE INDEX idx_transactions_order ON transactions(order_id);
+        CREATE INDEX IF NOT EXISTS idx_transactions_order ON transactions(order_id);
     END IF;
 END $$;
 
