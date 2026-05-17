@@ -1,0 +1,147 @@
+# Local development — PostgreSQL on localhost (pgAdmin), no SSH tunnel.
+# Activate with: SPRING_PROFILES_ACTIVE=local (see .env.local.example)
+
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/math_learning}
+    username: ${SPRING_DATASOURCE_USERNAME:math_learning}
+    password: ${SPRING_DATASOURCE_PASSWORD:MathLearning@2026}
+    driver-class-name: org.postgresql.Driver
+
+    hikari:
+      pool-name: HikariPoolLocal
+      auto-commit: false
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Creates/updates tables from JPA entities on empty local DB.
+      # Production uses ddl-auto: none + Flyway only.
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    show-sql: false
+
+  # Flyway is off locally: Hibernate builds the base schema first.
+  # Incremental SQL in db/migration runs on prod via Flyway.
+  flyway:
+    enabled: false
+
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:${REDIS_PASSWORD:12345}}
+      database: ${SPRING_DATA_REDIS_DATABASE:0}
+      timeout: 5000ms
+
+  mail:
+    host: ${MAIL_HOST:smtp.gmail.com}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+server:
+  port: ${SERVER_PORT:8080}
+
+jwt:
+  signerKey: ${JWT_SIGNERKEY:dev-local-jwt-signer-key-min-32-chars-long!!}
+  valid-duration: ${JWT_VALID_DURATION:36000}
+  refreshable-duration: ${JWT_REFRESHABLE_DURATION:36000}
+
+app:
+  frontend-url: ${FRONTEND_URL:http://localhost:3000}
+  backend-url: ${BACKEND_URL:http://localhost:8080}
+  init:
+    enabled: ${APP_INIT_ENABLED:true}
+    admin:
+      username: ${ADMIN_USERNAME:admin}
+      password: ${ADMIN_PASSWORD:Admin@123456}
+      email: ${ADMIN_GMAIL:admin@mathmaster.com}
+      fullname: ${ADMIN_FULLNAME:System Administrator}
+    student:
+      username: ${STUDENT_USERNAME:student}
+      password: ${STUDENT_PASSWORD:Student@123456}
+      email: ${STUDENT_GMAIL:student@mathmaster.com}
+      fullname: ${STUDENT_FULLNAME:Student User}
+    teacher:
+      username: ${TEACHER_USERNAME:teacher}
+      password: ${TEACHER_PASSWORD:Teacher@123456}
+      email: ${TEACHER_GMAIL:teacher@mathmaster.com}
+      fullname: ${TEACHER_FULLNAME:Teacher User}
+
+payos:
+  client-id: ${PAYOS_CLIENT_ID:}
+  api-key: ${PAYOS_API_KEY:}
+  checksum-key: ${PAYOS_CHECKSUM_KEY:}
+  return-url: ${PAYOS_RETURN_URL:http://localhost:3000/student/wallet}
+  cancel-url: ${PAYOS_CANCEL_URL:http://localhost:3000/student/wallet}
+
+centrifugo:
+  api-url: ${CENTRIFUGO_API_URL:http://localhost:8000/api}
+  api-key: ${CENTRIFUGO_API_KEY:a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6}
+  token-hmac-secret: ${CENTRIFUGO_TOKEN_SECRET:7b8f9e2d1c4a5b6c8d9e0f1a2b3c4d5e}
+  ws-url: ${CENTRIFUGO_WS_URL:ws://localhost:8000/connection/websocket}
+  token-ttl-hours: 1
+
+firebase:
+  enabled: ${FIREBASE_ENABLED:false}
+  service-account-path: ${FIREBASE_SERVICE_ACCOUNT_PATH:}
+  service-account-json: ${FIREBASE_SERVICE_ACCOUNT_JSON:}
+  project-id: ${FIREBASE_PROJECT_ID:}
+
+gemini:
+  api-key: ${GEMINI_API_KEY:}
+  model: ${GEMINI_MODEL:gemini-2.5-flash}
+  base-url: https://generativelanguage.googleapis.com
+  timeout-seconds: 60
+
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:minioadmin}
+  secret-key: ${MINIO_SECRET_KEY:minioadmin}
+  template-bucket: ${MINIO_TEMPLATE_BUCKET:slide-templates}
+  verification-bucket: ${MINIO_VERIFICATION_BUCKET:teacher-verifications}
+  course-videos-bucket: ${MINIO_COURSE_VIDEOS_BUCKET:course-videos}
+  course-materials-bucket: ${MINIO_COURSE_MATERIALS_BUCKET:course-materials}
+  ocr-content-bucket: ${MINIO_OCR_CONTENT_BUCKET:slide-templates}
+
+crawl-data:
+  base-url: ${CRAWL_DATA_BASE_URL:http://localhost:8001}
+  internal-api-key: ${CRAWL_DATA_INTERNAL_API_KEY:change-me-in-production}
+  timeout-seconds: 15
+
+ocr:
+  async:
+    enabled: true
+
+assessment:
+  draft:
+    ttl: 86400
+
+logging:
+  level:
+    org.springframework: INFO
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql: WARN

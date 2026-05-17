@@ -1,0 +1,6 @@
+# Shared defaults. Profile-specific config: application-local.yaml, application-prod.yaml
+spring:
+  profiles:
+    default: local
+  application:
+    name: math-master

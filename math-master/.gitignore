@@ -24,5 +24,5 @@ logs/*.txt
 *.org.eclipse.jdt.core.prefs
 .org.eclipse.jdt.core.prefs
 
-#Key in yaml
-application.yaml
+# Optional personal overrides (not committed)
+application-override.yaml

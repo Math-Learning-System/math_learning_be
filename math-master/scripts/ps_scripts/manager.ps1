@@ -1,27 +1,133 @@
-﻿# Math Master Manager - Windows PowerShell
+﻿# Math Master Manager - Windows PowerShell (local PostgreSQL dev)
 
 param(
     [ValidateSet(
         'ApplyFormat', 'SortAnnotations', 'CleanBuild', 'CleanBuildStart',
         'StartRedis', 'StopRedis', 'RestartRedis',
-        'StartAll', 'StopAll', 'RestartAll',
+        'StartInfra', 'StopInfra', 'RestartInfra',
         'DeployLocal', 'DeployFull', 'RecreateDocker',
         'Logs', 'LogsRedis', 'LogsApp',
-        'Status', 'DeleteLogs', 'SSHTunnel', 'Help'
+        'Status', 'DeleteLogs', 'SetupLocalDb', 'Help'
     )]
     [string]$Task,
     [switch]$Help,
     [string]$Service = ""
 )
 
-# â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+$script:InfraServices = @("redis", "centrifugo", "minio", "nginx-minio", "minio-init")
+
+# Cached once at load — Set-Alias to this script may leave $PSScriptRoot empty in functions.
+$script:MathMasterRoot = $null
+
+function Initialize-MathMasterRoot {
+    if ($script:MathMasterRoot -and (Test-Path (Join-Path $script:MathMasterRoot "mvnw.cmd"))) {
+        return $script:MathMasterRoot
+    }
+
+    $startDirs = @()
+    if ($PSScriptRoot) { $startDirs += $PSScriptRoot }
+    $cmdPath = $MyInvocation.MyCommand.Path
+    if ($cmdPath) { $startDirs += (Split-Path -Parent $cmdPath) }
+
+    foreach ($start in ($startDirs | Select-Object -Unique)) {
+        $dir = $start
+        for ($i = 0; $i -lt 8; $i++) {
+            $mvnw = Join-Path $dir "mvnw.cmd"
+            if (Test-Path $mvnw) {
+                $script:MathMasterRoot = (Resolve-Path $dir).Path
+                return $script:MathMasterRoot
+            }
+            $parent = Split-Path $dir -Parent
+            if (-not $parent -or $parent -eq $dir) { break }
+            $dir = $parent
+        }
+    }
+
+    $cwd = (Get-Location).Path
+    foreach ($candidate in @($cwd, (Join-Path $cwd "math-master"))) {
+        if (Test-Path (Join-Path $candidate "mvnw.cmd")) {
+            $script:MathMasterRoot = (Resolve-Path $candidate).Path
+            return $script:MathMasterRoot
+        }
+    }
+
+    return $null
+}
 
 function Get-ProjectRoot {
-    $root = (Get-Location).Path
-    if ($root -like "*\ps_scripts" -or $root -like "*\scripts*") {
-        $root = Split-Path (Split-Path $root)
+    $root = Initialize-MathMasterRoot
+    if ($root) { return $root }
+    Write-Err "Cannot find math-master (mvnw.cmd). cd to math-master or math_learning_be."
+    return (Get-Location).Path
+}
+
+$null = Initialize-MathMasterRoot
+
+function Import-ProjectEnvFile {
+    param([string]$Root)
+    $loaded = @()
+    foreach ($name in @(".env", ".env.local")) {
+        $path = Join-Path $Root $name
+        if (-not (Test-Path $path)) { continue }
+        Get-Content $path | ForEach-Object {
+            if ($_ -match '^\s*([^#][^=]*)\s*=\s*(.*)$') {
+                $key = $matches[1].Trim()
+                $val = $matches[2].Trim()
+                Set-Item -Path "env:$key" -Value $val
+            }
+        }
+        $loaded += $name
     }
-    return $root
+    if ($loaded.Count -eq 0) { return $null }
+    return ($loaded -join ", ")
+}
+
+function Test-UseLocalDatabase {
+    param([string]$Root)
+    Import-ProjectEnvFile $Root | Out-Null
+    if ($env:DB_MODE -eq 'local') { return $true }
+    if ($env:SPRING_PROFILES_ACTIVE -eq 'local') { return $true }
+    if ($env:SPRING_DATASOURCE_URL -match 'localhost|127\.0\.0\.1') { return $true }
+    return $true
+}
+
+function Test-LocalPostgresReady {
+    param([string]$Root)
+    Import-ProjectEnvFile $Root | Out-Null
+
+    $port = 5432
+    $dbName = "math_learning"
+    $dbUser = "math_learning"
+
+    if ($env:SPRING_DATASOURCE_URL -match 'jdbc:postgresql://[^:/]+:(\d+)/([^?]+)') {
+        $port = [int]$matches[1]
+        $dbName = $matches[2]
+    }
+    if ($env:SPRING_DATASOURCE_USERNAME) { $dbUser = $env:SPRING_DATASOURCE_USERNAME }
+
+    $tcp = Test-NetConnection -ComputerName localhost -Port $port -WarningAction SilentlyContinue
+    if (-not $tcp.TcpTestSucceeded) {
+        Write-Err "PostgreSQL is not listening on localhost:$port"
+        Write-Host "  Start the PostgreSQL service or create the database (menu [5])." -ForegroundColor Yellow
+        return $false
+    }
+
+    $psql = Get-Command psql -ErrorAction SilentlyContinue
+    if (-not $psql) {
+        Write-Host "WARN: psql not in PATH; skipping DB login check." -ForegroundColor Yellow
+        return $true
+    }
+
+    $env:PGPASSWORD = $env:SPRING_DATASOURCE_PASSWORD
+    $check = & psql -h localhost -p $port -U $dbUser -d $dbName -tAc "SELECT 1" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Cannot connect to database '$dbName' as '$dbUser'"
+        Write-Host "  Create DB in pgAdmin or run menu [5] Setup Local DB." -ForegroundColor Yellow
+        Write-Host "  Details: docs/LOCAL_DATABASE.md" -ForegroundColor Gray
+        return $false
+    }
+    Write-OK "PostgreSQL ready ($dbName @ localhost:$port)"
+    return $true
 }
 
 function Assert-Docker {
@@ -37,7 +143,7 @@ function Assert-Docker {
 
 function Assert-EnvFile($root) {
     if (-Not (Test-Path (Join-Path $root ".env"))) {
-        Write-Host "WARN: .env file not found at project root - using docker-compose defaults." -ForegroundColor Yellow
+        Write-Host "WARN: .env not found. Copy .env.local.example to .env" -ForegroundColor Yellow
     }
 }
 
@@ -54,7 +160,7 @@ function Write-OK($msg)   { Write-Host "OK  $msg" -ForegroundColor Green  }
 function Write-Err($msg)  { Write-Host "ERR $msg" -ForegroundColor Red    }
 
 function Stop-AppPort {
-    param([int]$Port = 8080, [switch]$SkipPostgres)
+    param([int]$Port = 8080)
     $procs = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
              Where-Object { $_.State -eq 'Listen' -or $_.State -eq 'Established' }
     if (-not $procs) { Write-OK "Port $Port is already free."; return }
@@ -62,13 +168,7 @@ function Stop-AppPort {
     foreach ($processId in $processList) {
         $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
         $name = if ($proc) { $proc.Name } else { "PID $processId" }
-
-        # Skip PostgreSQL processes if requested (they might be needed)
-        if ($SkipPostgres -and $name -match "postgres|pg_ctl") {
-            Write-Host "  Skipping PostgreSQL process: $name (PID $processId)" -ForegroundColor Yellow
-            continue
-        }
-
+        if ($name -match "postgres|pg_ctl") { continue }
         Write-Step "Killing process on port ${Port}: $name (PID $processId)"
         Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
     }
@@ -81,99 +181,39 @@ function Stop-AppPort {
     Write-Err "Port $Port still in use after 10s. Continuing anyway..."
 }
 
-function Test-SSHTunnel {
-    # Check if SSH tunnel is running on port 5432
-    $sshProcs = Get-NetTCPConnection -LocalPort 5432 -ErrorAction SilentlyContinue |
-                Where-Object { $_.State -eq 'Listen' }
-
-    if ($sshProcs) {
-        $processList = $sshProcs | Select-Object -ExpandProperty OwningProcess -Unique
-        foreach ($processId in $processList) {
-            $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
-            if ($proc -and $proc.Name -eq "ssh") {
-                return $true
-            }
-        }
-    }
-    return $false
+function Invoke-StartInfra {
+    if (-not (Assert-Docker)) { return }
+    $root = Get-ProjectRoot
+    Import-ProjectEnvFile $root | Out-Null
+    Push-Location $root
+    Write-Step "Starting Docker infra (redis, minio, centrifugo) — not postgres (use pgAdmin)..."
+    docker compose up -d @script:InfraServices
+    if ($LASTEXITCODE -eq 0) { Write-OK "Infrastructure started."; docker compose ps }
+    else { Write-Err "Failed to start infrastructure." }
+    Pop-Location
 }
 
-function Start-SSHTunnelIfNeeded {
-    if (Test-SSHTunnel) {
-        Write-OK "SSH tunnel is already running on port 5432."
-        return $true
-    }
-
-    Write-Host ""
-    Write-Host "WARNING: SSH tunnel to production database is NOT running!" -ForegroundColor Yellow
-    Write-Host "The application needs SSH tunnel to connect to the database." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Options:" -ForegroundColor Cyan
-    Write-Host "  [Y] Start SSH tunnel now (recommended)" -ForegroundColor Green
-    Write-Host "  [N] Continue without tunnel (app will fail to connect)" -ForegroundColor Red
-    Write-Host "  [C] Cancel and exit" -ForegroundColor Gray
-    Write-Host ""
-
-    $choice = Read-Host "Start SSH tunnel? (Y/N/C)"
-
-    switch ($choice.ToUpper()) {
-        'Y' {
-            # Start SSH tunnel (port 5432 should already be free from earlier cleanup)
-            Write-Step "Starting SSH tunnel in background..."
-            $script = Join-Path $PSScriptRoot "ssh-tunnel.ps1"
-            if (-Not (Test-Path $script)) {
-                Write-Err "ssh-tunnel.ps1 not found at: $script"
-                return $false
-            }
-
-            # Start SSH tunnel in a new PowerShell window (not in current terminal)
-            Write-Host ""
-            Write-Host "Note: SSH tunnel will open in a separate window." -ForegroundColor Yellow
-            Write-Host "Keep that window open while working." -ForegroundColor Yellow
-            Write-Host ""
-            Start-Process powershell -ArgumentList "-NoExit", "-File", "`"$script`""
-
-            Write-Host "Waiting for SSH tunnel to establish (up to 5 seconds)..." -ForegroundColor Yellow
-            Write-Host "If this is the first connection, you may need to accept the SSH host key in the tunnel window." -ForegroundColor Gray
-            Write-Host ""
-
-            $maxWait = 5
-            for ($i = 0; $i -lt $maxWait; $i++) {
-                Start-Sleep -Seconds 1
-                Write-Host "." -NoNewline -ForegroundColor Gray
-
-                if (Test-SSHTunnel) {
-                    Write-Host ""
-                    Write-OK "SSH tunnel established successfully!"
-                    Write-Host "  Keep the SSH tunnel window open while working." -ForegroundColor Yellow
-                    Write-Host ""
-                    return $true
-                }
-            }
-
-            Write-Host ""
-            Write-Host ""
-            Write-Host "Continuing without confirmed tunnel (tunnel may still be connecting)..." -ForegroundColor Yellow
-            Write-Host "The SSH tunnel window will continue running in the background." -ForegroundColor Gray
-            Write-Host ""
-            return $true
-        }
-        'N' {
-            Write-Host "Continuing without SSH tunnel..." -ForegroundColor Yellow
-            return $true
-        }
-        'C' {
-            Write-Host "Cancelled." -ForegroundColor Gray
-            return $false
-        }
-        default {
-            Write-Host "Invalid choice. Cancelled." -ForegroundColor Red
-            return $false
-        }
-    }
+function Invoke-StopInfra {
+    if (-not (Assert-Docker)) { return }
+    $root = Get-ProjectRoot
+    Push-Location $root
+    Write-Step "Stopping infrastructure containers..."
+    docker compose stop @script:InfraServices 2>&1 | Out-Null
+    Write-OK "Infrastructure stopped."
+    Pop-Location
 }
 
-# Tasks
+function Invoke-RestartInfra {
+    if (-not (Assert-Docker)) { return }
+    $root = Get-ProjectRoot
+    Push-Location $root
+    docker compose restart @script:InfraServices
+    if ($LASTEXITCODE -eq 0) { Write-OK "Infrastructure restarted." }
+    else { Write-Err "Restart failed." }
+    Pop-Location
+}
+
+# --- Tasks ---
 
 function Invoke-ApplyFormat {
     Write-Header "Code Formatting (Spotless)"
@@ -181,10 +221,10 @@ function Invoke-ApplyFormat {
     if (-Not (Test-Path (Join-Path $root "mvnw.cmd"))) { Write-Err "mvnw.cmd not found at: $root"; return }
     Push-Location $root
     Write-Step "Checking formatting..."
-    &.\mvnw.cmd -DskipTests spotless:check 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
+    & .\mvnw.cmd -DskipTests spotless:check 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
     if ($LASTEXITCODE -eq 0) { Write-OK "All files already formatted."; Pop-Location; return }
     Write-Step "Applying fixes..."
-    &.\mvnw.cmd -DskipTests spotless:apply 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
+    & .\mvnw.cmd -DskipTests spotless:apply 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
     if ($LASTEXITCODE -eq 0) { Write-OK "Formatting applied successfully." } else { Write-Err "Formatting failed." }
     Pop-Location
 }
@@ -204,92 +244,65 @@ function Invoke-CleanBuild {
     $root = Get-ProjectRoot
     if (-Not (Test-Path (Join-Path $root "mvnw.cmd"))) { Write-Err "mvnw.cmd not found."; return }
     Push-Location $root
+    Import-ProjectEnvFile $root | Out-Null
     Write-Step "Running: mvnw clean compile..."
-    &.\mvnw.cmd clean compile -q 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
+    & .\mvnw.cmd clean compile -q 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
     if ($LASTEXITCODE -eq 0) { Write-OK "Build successful." } else { Write-Err "Build failed." }
     Pop-Location
 }
 
 function Invoke-CleanBuildStart {
-    Write-Header "Clean Build + Start Project"
+    Write-Header "Clean Build + Start (local DB)"
     $root = Get-ProjectRoot
-    if (-Not (Test-Path (Join-Path $root "mvnw.cmd"))) { Write-Err "mvnw.cmd not found."; return }
-
-    # Step 0a: Kill non-SSH processes on port 5432 FIRST (before checking tunnel)
-    # Skip ssh processes — they are the SSH tunnel we want to keep!
-    Write-Step "Cleaning up port 5432..."
-    $procs = Get-NetTCPConnection -LocalPort 5432 -ErrorAction SilentlyContinue |
-             Where-Object { $_.State -eq 'Listen' }
-
-    if ($procs) {
-        $processList = $procs | Select-Object -ExpandProperty OwningProcess -Unique
-        $killed = $false
-        foreach ($processId in $processList) {
-            $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
-            if ($proc) {
-                $name = $proc.Name
-                if ($name -match "^ssh$|^plink$") {
-                    Write-Host "  Keeping SSH tunnel process: $name (PID $processId)" -ForegroundColor Cyan
-                    continue
-                }
-                Write-Host "  Stopping process: $name (PID $processId)" -ForegroundColor Gray
-                Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-                $killed = $true
-            }
-        }
-        if ($killed) {
-            Start-Sleep -Seconds 2
-        }
-        Write-OK "Port 5432 is now free."
-    } else {
-        Write-OK "Port 5432 is already free."
-    }
-
-    # Step 0b: Check SSH tunnel for database connection
-    Write-Step "Checking SSH tunnel to production database..."
-    if (-not (Start-SSHTunnelIfNeeded)) {
-        Write-Err "Cannot proceed without database connection."
+    if (-Not (Test-Path (Join-Path $root "mvnw.cmd"))) {
+        Write-Err "mvnw.cmd not found at: $root"
+        Write-Host "  Expected: ...\math-master\mvnw.cmd" -ForegroundColor Yellow
+        Write-Host "  Run from repo or reinstall alias: scripts\ps_scripts\install.ps1" -ForegroundColor Yellow
         return
     }
+    Write-OK "Project root: $root"
 
-    # Step 1: Remove the app Docker container so it cannot occupy port 8080
+    $loadedEnv = Import-ProjectEnvFile $root
+    if ($loadedEnv) { Write-OK "Env: $loadedEnv" }
+
+    if (-not (Test-LocalPostgresReady $root)) { return }
+
     if (Assert-Docker) {
-        Assert-EnvFile $root
         Push-Location $root
-        Write-Step "Removing app container to free port 8080..."
-        # rm -f -s: force-stop then remove the container entirely (prevents auto-restart)
+        Write-Step "Freeing port 8080 (Docker app container)..."
         docker compose rm -f -s app 2>&1 | Out-Null
-        Write-Step "Starting infrastructure services (redis, centrifugo, minio)..."
-        docker compose up -d redis centrifugo minio nginx-minio minio-init
-        if ($LASTEXITCODE -ne 0) { Write-Err "Failed to start infrastructure services."; Pop-Location; return }
-        Write-OK "Infrastructure services started."
+        Write-Step "Starting Docker infra..."
+        docker compose up -d @script:InfraServices
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "Failed to start infrastructure. Is Docker Desktop running?"
+            Pop-Location
+            return
+        }
+        Write-OK "Redis / MinIO / Centrifugo ready."
         Pop-Location
     }
 
-    # Step 2: Clean build
     Push-Location $root
-    Write-Step "Running Maven clean compile..."
-    &.\mvnw.cmd clean compile -q 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
-    if ($LASTEXITCODE -ne 0) { Write-Err "Build failed. Fix errors before starting."; Pop-Location; return }
+    Write-Step "Maven clean compile..."
+    & .\mvnw.cmd clean compile -q 2>&1 | Where-Object { $_ -notmatch "Downloading|Downloaded" }
+    if ($LASTEXITCODE -ne 0) { Write-Err "Build failed."; Pop-Location; return }
     Write-OK "Build successful."
 
-    # Step 3: Kill anything still on port 8080 right before starting
     Stop-AppPort -Port 8080
 
-    # Step 4: Start Spring Boot
-    Write-Step "Starting Spring Boot application... (Ctrl+C to stop)"
+    Write-Step "Starting Spring Boot (profile local, Hibernate creates tables on first run)..."
+    Write-Host "  API: http://localhost:8080  |  Ctrl+C to stop" -ForegroundColor Gray
     Write-Host ""
-    &.\mvnw.cmd spring-boot:run
+    & .\mvnw.cmd spring-boot:run
     Pop-Location
 }
 
 function Invoke-StartRedis {
     Write-Header "Start Redis"
     if (-not (Assert-Docker)) { return }
-    $root = Get-ProjectRoot; Assert-EnvFile $root; Push-Location $root
-    Write-Step "Starting Redis container..."
+    $root = Get-ProjectRoot; Push-Location $root
     docker compose up -d redis
-    if ($LASTEXITCODE -eq 0) { Write-OK "Redis started." } else { Write-Err "Failed to start Redis." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "Redis started." } else { Write-Err "Failed." }
     Pop-Location
 }
 
@@ -297,9 +310,8 @@ function Invoke-StopRedis {
     Write-Header "Stop Redis"
     if (-not (Assert-Docker)) { return }
     $root = Get-ProjectRoot; Push-Location $root
-    Write-Step "Stopping Redis container..."
     docker compose stop redis
-    if ($LASTEXITCODE -eq 0) { Write-OK "Redis stopped." } else { Write-Err "Failed to stop Redis." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "Redis stopped." } else { Write-Err "Failed." }
     Pop-Location
 }
 
@@ -307,117 +319,88 @@ function Invoke-RestartRedis {
     Write-Header "Restart Redis"
     if (-not (Assert-Docker)) { return }
     $root = Get-ProjectRoot; Push-Location $root
-    Write-Step "Restarting Redis container..."
     docker compose restart redis
-    if ($LASTEXITCODE -eq 0) { Write-OK "Redis restarted." } else { Write-Err "Failed to restart Redis." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "Redis restarted." } else { Write-Err "Failed." }
     Pop-Location
 }
 
 function Invoke-StartAll {
-    Write-Header "Start All Services"
+    Write-Header "Start All Docker Services"
+    Write-Host "  Local dev uses PostgreSQL on the host (pgAdmin), not Docker postgres." -ForegroundColor Yellow
+    Write-Host "  Prefer menu [8] Start Infra, or [4] Clean Build + Start." -ForegroundColor Yellow
+    $confirm = Read-Host "  Start ALL compose services including postgres container? (y/N)"
+    if ($confirm -ne 'y') { Invoke-StartInfra; return }
     if (-not (Assert-Docker)) { return }
-    $root = Get-ProjectRoot; Assert-EnvFile $root; Push-Location $root
-    Write-Step "Starting all containers..."
+    $root = Get-ProjectRoot; Push-Location $root
     docker compose up -d
-    if ($LASTEXITCODE -eq 0) { Write-OK "All services started."; Write-Host ""; docker compose ps }
-    else { Write-Err "Some services failed to start." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "All services started."; docker compose ps }
+    else { Write-Err "Some services failed." }
     Pop-Location
 }
 
 function Invoke-StopAll {
-    Write-Header "Stop All Services"
+    Write-Header "Stop All Docker Services"
     if (-not (Assert-Docker)) { return }
     $root = Get-ProjectRoot; Push-Location $root
-    Write-Step "Stopping all containers..."
     docker compose down
-    if ($LASTEXITCODE -eq 0) { Write-OK "All services stopped." } else { Write-Err "Failed to stop services." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "All services stopped." } else { Write-Err "Failed." }
     Pop-Location
 }
 
 function Invoke-RestartAll {
-    Write-Header "Restart All Services"
+    Write-Header "Restart All Docker Services"
     if (-not (Assert-Docker)) { return }
     $root = Get-ProjectRoot; Push-Location $root
-    Write-Step "Restarting all containers..."
     docker compose restart
-    if ($LASTEXITCODE -eq 0) { Write-OK "All services restarted."; Write-Host ""; docker compose ps }
-    else { Write-Err "Restart failed." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "Restarted."; docker compose ps }
+    else { Write-Err "Failed." }
     Pop-Location
 }
 
 function Invoke-DeployLocal {
-    Write-Header "Local Deploy (build + up)"
+    Write-Header "Docker Deploy (full stack in containers)"
+    Write-Host "  For daily dev with pgAdmin DB, use menu [4] instead." -ForegroundColor Yellow
     if (-not (Assert-Docker)) { return }
-
-    # Check SSH tunnel before deploying
-    Write-Step "Checking SSH tunnel to production database..."
-    if (-not (Start-SSHTunnelIfNeeded)) {
-        Write-Host "Continuing without SSH tunnel check..." -ForegroundColor Yellow
-    }
-
-    $root = Get-ProjectRoot; Assert-EnvFile $root; Push-Location $root
-    Write-Step "Building Docker images (no-cache)..."
+    $root = Get-ProjectRoot
+    Import-ProjectEnvFile $root | Out-Null
+    Push-Location $root
     docker compose build --no-cache
-    if ($LASTEXITCODE -ne 0) { Write-Err "Docker build failed."; Pop-Location; return }
-    Write-Step "Starting services..."
+    if ($LASTEXITCODE -ne 0) { Write-Err "Build failed."; Pop-Location; return }
     docker compose up -d
-    if ($LASTEXITCODE -eq 0) { Write-OK "Deployment complete."; Write-Host ""; docker compose ps }
-    else { Write-Err "Failed to start services." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "Done."; docker compose ps }
+    else { Write-Err "Start failed." }
     Pop-Location
 }
 
 function Invoke-DeployFull {
-    Write-Header "Full Deploy (down + clean build + up)"
+    Write-Header "Docker Full Deploy"
+    Write-Host "  For daily dev with pgAdmin DB, use menu [4] instead." -ForegroundColor Yellow
     if (-not (Assert-Docker)) { return }
-
-    # Check SSH tunnel before deploying
-    Write-Step "Checking SSH tunnel to production database..."
-    if (-not (Start-SSHTunnelIfNeeded)) {
-        Write-Host "Continuing without SSH tunnel check..." -ForegroundColor Yellow
-    }
-
-    $root = Get-ProjectRoot; Assert-EnvFile $root; Push-Location $root
-
-    Write-Step "Stopping existing containers..."
+    $root = Get-ProjectRoot
+    Import-ProjectEnvFile $root | Out-Null
+    Push-Location $root
     docker compose down --remove-orphans
-
-    Write-Step "Pruning unused images..."
     docker image prune -f | Out-Null
-
-    Write-Step "Building Docker images (no-cache)..."
     docker compose build --no-cache
-    if ($LASTEXITCODE -ne 0) { Write-Err "Docker build failed."; Pop-Location; return }
-
-    Write-Step "Starting all services..."
+    if ($LASTEXITCODE -ne 0) { Write-Err "Build failed."; Pop-Location; return }
     docker compose up -d
-    if ($LASTEXITCODE -eq 0) {
-        Write-OK "Full deployment complete."
-        Write-Host ""
-        docker compose ps
-    } else { Write-Err "Failed to start services." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "Done."; docker compose ps }
+    else { Write-Err "Start failed." }
     Pop-Location
 }
 
 function Invoke-RecreateDocker {
-    Write-Header "Recreate Docker Containers (force-recreate)"
+    Write-Header "Recreate Docker Containers"
     if (-not (Assert-Docker)) { return }
-    $root = Get-ProjectRoot; Assert-EnvFile $root; Push-Location $root
-
+    $root = Get-ProjectRoot; Push-Location $root
     $target = if ($Service) { $Service } else { "" }
-
     if ($target) {
-        Write-Step "Force-recreating container: $target"
         docker compose up -d --force-recreate $target
     } else {
-        Write-Step "Force-recreating all containers (no rebuild)..."
-        docker compose up -d --force-recreate
+        docker compose up -d --force-recreate @script:InfraServices
     }
-
-    if ($LASTEXITCODE -eq 0) {
-        Write-OK "Containers recreated."
-        Write-Host ""
-        docker compose ps
-    } else { Write-Err "Recreate failed." }
+    if ($LASTEXITCODE -eq 0) { Write-OK "Done."; docker compose ps }
+    else { Write-Err "Failed." }
     Pop-Location
 }
 
@@ -426,10 +409,8 @@ function Invoke-Logs($service, $title) {
     if (-not (Assert-Docker)) { return }
     $root = Get-ProjectRoot; Push-Location $root
     if ($service) {
-        Write-Step "Tailing logs for: $service (Ctrl+C to stop)"
         docker compose logs -f --tail=100 $service
     } else {
-        Write-Step "Tailing all service logs (Ctrl+C to stop)"
         docker compose logs -f --tail=50
     }
     Pop-Location
@@ -437,126 +418,73 @@ function Invoke-Logs($service, $title) {
 
 function Invoke-Status {
     Write-Header "Project Status"
-    if (-not (Assert-Docker)) { return }
-    $root = Get-ProjectRoot; Push-Location $root
-    Write-Host "Docker containers:" -ForegroundColor Cyan
-    docker compose ps
+    $root = Get-ProjectRoot
+    Import-ProjectEnvFile $root | Out-Null
+    Write-Host "Database (from .env):" -ForegroundColor Cyan
+    Write-Host "  $($env:SPRING_DATASOURCE_URL)" -ForegroundColor White
     Write-Host ""
-    Write-Host "Docker image sizes:" -ForegroundColor Cyan
-    docker compose images
-    Pop-Location
+    if (Assert-Docker) {
+        Push-Location $root
+        docker compose ps
+        Pop-Location
+    }
     Write-Host ""
 }
 
 function Invoke-DeleteLogs {
     Write-Header "Delete Log Files"
     $root = Get-ProjectRoot
-    $logDir = Join-Path $root "scripts\logs"
-    $altLogDir = Join-Path $root "logs"
     $deleted = 0
-
-    foreach ($dir in @($logDir, $altLogDir)) {
+    foreach ($dir in @((Join-Path $root "scripts\logs"), (Join-Path $root "logs"))) {
         if (Test-Path $dir) {
-            $files = Get-ChildItem -Path $dir -Include "*.log","*.txt" -Recurse -ErrorAction SilentlyContinue
-            foreach ($f in $files) { Remove-Item $f.FullName -Force; $deleted++ }
+            Get-ChildItem -Path $dir -Include "*.log","*.txt" -Recurse -ErrorAction SilentlyContinue |
+                ForEach-Object { Remove-Item $_.FullName -Force; $deleted++ }
         }
     }
-
-    if ($deleted -gt 0) { Write-OK "Deleted $deleted log file(s)." }
+    if ($deleted -gt 0) { Write-OK "Deleted $deleted file(s)." }
     else { Write-Host "No log files found." -ForegroundColor Yellow }
-    Write-Host ""
 }
 
-function Invoke-SSHTunnel {
-    Write-Header "SSH Tunnel to Production Database"
-    $script = Join-Path $PSScriptRoot "ssh-tunnel.ps1"
-    if (-Not (Test-Path $script)) { Write-Err "ssh-tunnel.ps1 not found."; return }
+function Invoke-SetupLocalDb {
+    Write-Header "Setup Local PostgreSQL (math_learning)"
+    $script = Join-Path $PSScriptRoot "setup-local-db.ps1"
+    if (-Not (Test-Path $script)) { Write-Err "setup-local-db.ps1 not found."; return }
     & $script
 }
 
-# â”€â”€â”€ Help â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 function Show-Help {
     Write-Host ""
-    Write-Host "Math Master PowerShell Manager" -ForegroundColor Cyan
+    Write-Host "Math Master Manager (local PostgreSQL)" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "USAGE:" -ForegroundColor Cyan
-    Write-Host "  .\manager.ps1 -Task <TaskName> [-Service <name>]" -ForegroundColor White
+    Write-Host "  First time: [5] Setup DB  ->  [4] Clean Build + Start" -ForegroundColor Green
     Write-Host ""
-    Write-Host "TASKS:" -ForegroundColor Cyan
-    $tasks = @(
-        @{ Name = "ApplyFormat";      Desc = "Run Spotless code formatter" },
-        @{ Name = "SortAnnotations";  Desc = "Standardize Lombok annotation order in entity files" },
-        @{ Name = "CleanBuild";       Desc = "Maven clean compile (local)" },
-        @{ Name = "CleanBuildStart";  Desc = "Start Docker services + clean build + spring-boot:run" },
-        @{ Name = "StartRedis";     Desc = "Start only the Redis container" },
-        @{ Name = "StopRedis";      Desc = "Stop the Redis container" },
-        @{ Name = "RestartRedis";   Desc = "Restart the Redis container" },
-        @{ Name = "StartAll";       Desc = "Start all docker-compose services" },
-        @{ Name = "StopAll";        Desc = "Stop all docker-compose services (docker compose down)" },
-        @{ Name = "RestartAll";     Desc = "Restart all running containers" },
-        @{ Name = "DeployLocal";    Desc = "Build images (no-cache) then docker compose up" },
-        @{ Name = "DeployFull";     Desc = "Full: down + prune + build no-cache + up" },
-        @{ Name = "RecreateDocker"; Desc = "Force-recreate containers without rebuild (-Service redis)" },
-        @{ Name = "Logs";           Desc = "Tail logs for all services" },
-        @{ Name = "LogsRedis";      Desc = "Tail Redis container logs" },
-        @{ Name = "LogsApp";        Desc = "Tail app container logs" },
-        @{ Name = "Status";         Desc = "Show container status and image sizes" },
-        @{ Name = "DeleteLogs";     Desc = "Delete *.log / *.txt from logs folders" },
-        @{ Name = "SSHTunnel";      Desc = "Start SSH tunnel to production database server" },
-        @{ Name = "Help";           Desc = "Show this help" }
-    )
-    foreach ($t in $tasks) {
-        Write-Host ("  {0,-18} {1}" -f $t.Name, $t.Desc) -ForegroundColor White
-    }
-    Write-Host ""
-    Write-Host "EXAMPLES:" -ForegroundColor Cyan
-    Write-Host "  .\manager.ps1 -Task StartRedis" -ForegroundColor Green
-    Write-Host "  .\manager.ps1 -Task RecreateDocker -Service redis" -ForegroundColor Green
-    Write-Host "  .\manager.ps1 -Task DeployFull" -ForegroundColor Green
-    Write-Host "  .\manager.ps1 -Task LogsApp" -ForegroundColor Green
+    Write-Host "  khoipd_terminal_ps -Task CleanBuildStart" -ForegroundColor White
+    Write-Host "  Docs: math-master/docs/LOCAL_DATABASE.md" -ForegroundColor Gray
     Write-Host ""
 }
-
-# â”€â”€â”€ Menu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function Show-MainMenu {
     Write-Host ""
-    Write-Host "  Math Master Manager" -ForegroundColor Cyan
+    Write-Host "  Math Master Manager (local dev)" -ForegroundColor Cyan
     Write-Host ("  " + "-" * 35) -ForegroundColor DarkCyan
-    Write-Host "  [1]  Format Code (Spotless)"           -ForegroundColor White
-    Write-Host "  [2]  Sort Annotations"                  -ForegroundColor White
-    Write-Host "  [3]  Maven Clean Build"                 -ForegroundColor White
-    Write-Host "  [4]  Clean Build + Start Project"       -ForegroundColor Green
+    Write-Host "  [4]  Clean Build + Start Project  (main)" -ForegroundColor Green
+    Write-Host "  [5]  Setup Local DB (pgAdmin / psql)" -ForegroundColor Yellow
     Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
-    Write-Host "  [5]  Start Redis"                       -ForegroundColor White
-    Write-Host "  [6]  Stop Redis"                        -ForegroundColor White
-    Write-Host "  [7]  Restart Redis"                     -ForegroundColor White
+    Write-Host "  [1]  Format Code (Spotless)" -ForegroundColor White
+    Write-Host "  [2]  Sort Annotations" -ForegroundColor White
+    Write-Host "  [3]  Maven Clean Build" -ForegroundColor White
     Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
-    Write-Host "  [8]  Start All Services"                -ForegroundColor White
-    Write-Host "  [9]  Stop All Services"                 -ForegroundColor White
-    Write-Host "  [10] Restart All Services"              -ForegroundColor White
+    Write-Host "  [6]  Start Redis" -ForegroundColor White
+    Write-Host "  [7]  Stop Redis" -ForegroundColor White
+    Write-Host "  [8]  Start Infra (redis+minio+centrifugo)" -ForegroundColor White
+    Write-Host "  [9]  Stop All Docker" -ForegroundColor White
     Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
-    Write-Host "  [11] Deploy Local (build + up)"         -ForegroundColor White
-    Write-Host "  [12] Deploy Full  (down+build+up)"      -ForegroundColor White
-    Write-Host "  [13] Recreate Docker Containers"        -ForegroundColor White
-    Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
-    Write-Host "  [14] Tail All Logs"                     -ForegroundColor White
-    Write-Host "  [15] Tail Redis Logs"                   -ForegroundColor White
-    Write-Host "  [16] Tail App Logs"                     -ForegroundColor White
-    Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
-    Write-Host "  [17] Project Status"                    -ForegroundColor White
-    Write-Host "  [18] Delete Log Files"                  -ForegroundColor White
-    Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
-    Write-Host "  [21] SSH Tunnel to Production DB"       -ForegroundColor Yellow
-    Write-Host ("  " + "-" * 35) -ForegroundColor DarkGray
-    Write-Host "  [19] Help"                              -ForegroundColor White
-    Write-Host "  [20] Clear Screen"                      -ForegroundColor White
-    Write-Host "  [0]  Exit"                              -ForegroundColor DarkGray
+    Write-Host "  [11] Docker full deploy (optional)" -ForegroundColor DarkGray
+    Write-Host "  [17] Status" -ForegroundColor White
+    Write-Host "  [19] Help / docs hint" -ForegroundColor White
+    Write-Host "  [0]  Exit" -ForegroundColor DarkGray
     Write-Host ""
 }
-
-# â”€â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 if ($Help -or $Task -eq 'Help') { Show-Help; exit 0 }
 
@@ -566,21 +494,24 @@ if ($Task) {
         'SortAnnotations'  { Invoke-SortAnnotations }
         'CleanBuild'       { Invoke-CleanBuild }
         'CleanBuildStart'  { Invoke-CleanBuildStart }
-        'StartRedis'     { Invoke-StartRedis }
-        'StopRedis'      { Invoke-StopRedis }
-        'RestartRedis'   { Invoke-RestartRedis }
-        'StartAll'       { Invoke-StartAll }
-        'StopAll'        { Invoke-StopAll }
-        'RestartAll'     { Invoke-RestartAll }
-        'DeployLocal'    { Invoke-DeployLocal }
-        'DeployFull'     { Invoke-DeployFull }
-        'RecreateDocker' { Invoke-RecreateDocker }
-        'Logs'           { Invoke-Logs "" "All Logs" }
-        'LogsRedis'      { Invoke-Logs "redis" "Redis Logs" }
-        'LogsApp'        { Invoke-Logs "math-master" "App Logs" }
-        'Status'         { Invoke-Status }
-        'DeleteLogs'     { Invoke-DeleteLogs }
-        'SSHTunnel'      { Invoke-SSHTunnel }
+        'StartRedis'       { Invoke-StartRedis }
+        'StopRedis'        { Invoke-StopRedis }
+        'RestartRedis'     { Invoke-RestartRedis }
+        'StartInfra'       { Invoke-StartInfra }
+        'StopInfra'        { Invoke-StopInfra }
+        'RestartInfra'     { Invoke-RestartInfra }
+        'StartAll'         { Invoke-StartAll }
+        'StopAll'          { Invoke-StopAll }
+        'RestartAll'       { Invoke-RestartAll }
+        'DeployLocal'      { Invoke-DeployLocal }
+        'DeployFull'       { Invoke-DeployFull }
+        'RecreateDocker'   { Invoke-RecreateDocker }
+        'Logs'             { Invoke-Logs "" "All Logs" }
+        'LogsRedis'        { Invoke-Logs "redis" "Redis Logs" }
+        'LogsApp'          { Invoke-Logs "app" "App Logs" }
+        'Status'           { Invoke-Status }
+        'DeleteLogs'       { Invoke-DeleteLogs }
+        'SetupLocalDb'     { Invoke-SetupLocalDb }
     }
     exit 0
 }
@@ -589,31 +520,23 @@ while ($true) {
     Show-MainMenu
     $choice = Read-Host "  Select"
     switch ($choice) {
+        '4'  { Invoke-CleanBuildStart }
+        '5'  { Invoke-SetupLocalDb }
         '1'  { Invoke-ApplyFormat }
         '2'  { Invoke-SortAnnotations }
         '3'  { Invoke-CleanBuild }
-        '4'  { Invoke-CleanBuildStart }
-        '5'  { Invoke-StartRedis }
-        '6'  { Invoke-StopRedis }
-        '7'  { Invoke-RestartRedis }
-        '8'  { Invoke-StartAll }
+        '6'  { Invoke-StartRedis }
+        '7'  { Invoke-StopRedis }
+        '8'  { Invoke-StartInfra }
         '9'  { Invoke-StopAll }
-        '10' { Invoke-RestartAll }
         '11' { Invoke-DeployLocal }
-        '12' { Invoke-DeployFull }
-        '13' {
-            $svc = Read-Host "  Service name (leave blank for all)"
-            $Service = $svc.Trim()
-            Invoke-RecreateDocker
-        }
-        '14' { Invoke-Logs "" "All Logs" }
-        '15' { Invoke-Logs "redis" "Redis Logs" }
-        '16' { Invoke-Logs "math-master" "App Logs" }
         '17' { Invoke-Status }
-        '18' { Invoke-DeleteLogs }
-        '21' { Invoke-SSHTunnel }
         '19' { Show-Help }
-        '20' { Clear-Host }
         '0'  { Write-Host ""; Write-Host "  Goodbye!" -ForegroundColor Cyan; exit 0 }
+        default {
+            if ($choice) {
+                Write-Host "  Unknown option. First time: [5] then [4]." -ForegroundColor Yellow
+            }
+        }
     }
 }

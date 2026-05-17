@@ -35,19 +35,48 @@ if (-Not (Test-Path $ProfilePath)) {
     New-Item -Path $ProfilePath -ItemType File -Force | Out-Null
 }
 
-$AliasLine = "Set-Alias -Name khoipd_terminal_ps -Value '$ManagerScript' -Option AllScope -Scope Global -Force"
+# Function wrapper so $PSScriptRoot / project paths resolve reliably (plain Set-Alias to .ps1 does not).
+$Wrapper = @"
+function global:khoipd_terminal_ps {
+    param(
+        [string]`$Task,
+        [switch]`$Help,
+        [string]`$Service = ''
+    )
+    if (`$Help) {
+        & '$ManagerScript' -Help
+    } elseif (`$Task) {
+        & '$ManagerScript' -Task `$Task -Service `$Service
+    } else {
+        & '$ManagerScript'
+    }
+}
+"@
 
-if (Select-String -Path $ProfilePath -Pattern "khoipd_terminal_ps" -ErrorAction SilentlyContinue) {
-    $Content = Get-Content $ProfilePath
-    $Content = $Content | Where-Object { $_ -notmatch "khoipd_terminal_ps" }
-    $Content | Set-Content $ProfilePath
+function Install-ManagerIntoProfile([string]$Path) {
+    if (-not $Path) { return }
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -ItemType File -Force | Out-Null }
+    $content = Get-Content $Path -ErrorAction SilentlyContinue
+    if ($content) {
+        $filtered = $content | Where-Object {
+            $_ -notmatch "khoipd_terminal_ps" -and
+            $_ -notmatch "Math Master Project Manager" -and
+            $_ -notmatch "final_thesis.*manager\.ps1"
+        }
+        $filtered | Set-Content $Path
+    }
+    Add-Content -Path $Path -Value ""
+    Add-Content -Path $Path -Value "# Math Master Project Manager"
+    Add-Content -Path $Path -Value $Wrapper
+    Write-Host "  Updated: $Path" -ForegroundColor Green
 }
 
-Add-Content -Path $ProfilePath -Value ""
-Add-Content -Path $ProfilePath -Value "# Math Master Project Manager"
-Add-Content -Path $ProfilePath -Value $AliasLine
+Install-ManagerIntoProfile $ProfilePath
+$vscodeProfile = Join-Path $ProfileDir "Microsoft.VSCode_profile.ps1"
+Install-ManagerIntoProfile $vscodeProfile
 
-Write-Host "Added alias to profile" -ForegroundColor Green
 Write-Host ""
 
 Write-Host "============================================================" -ForegroundColor Green
@@ -89,9 +118,9 @@ if ($dockerFound) {
 Write-Host ""
 Write-Host "Getting Started:" -ForegroundColor Green
 Write-Host ""
-Write-Host "  khoipd_terminal_ps              # Interactive menu" -ForegroundColor White
-Write-Host "  khoipd_terminal_ps -Task ApplyFormat" -ForegroundColor White
-Write-Host "  khoipd_terminal_ps -Task DeployLocal" -ForegroundColor White
+Write-Host "  khoipd_terminal_ps                    # Menu: [5] Setup DB, [4] Start app" -ForegroundColor White
+Write-Host "  khoipd_terminal_ps -Task SetupLocalDb" -ForegroundColor White
+Write-Host "  khoipd_terminal_ps -Task CleanBuildStart" -ForegroundColor White
 Write-Host ""
 Write-Host "Happy coding!" -ForegroundColor Green
 Write-Host ""
