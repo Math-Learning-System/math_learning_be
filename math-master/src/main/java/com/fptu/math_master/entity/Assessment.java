@@ -160,6 +160,15 @@ public class Assessment extends BaseEntity {
   @Enumerated(EnumType.STRING)
   private AssessmentStatus status;
 
+  /** MinIO object key for PDF imported via Cách 2 (bucket: slide-templates). */
+  @Column(name = "source_pdf_path", length = 500)
+  private String sourcePdfPath;
+
+  /** Original filename from teacher upload. */
+  @Size(max = 255)
+  @Column(name = "source_pdf_original_name", length = 255)
+  private String sourcePdfOriginalName;
+
   /**
    * Relationships
    * - Many-to-One with User (teacher)

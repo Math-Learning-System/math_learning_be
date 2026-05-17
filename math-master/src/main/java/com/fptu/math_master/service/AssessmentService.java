@@ -52,6 +52,9 @@ public interface AssessmentService {
 
   AssessmentResponse getAssessmentById(UUID id);
 
+  /** Presigned URL for PDF uploaded via import (Cách 2). */
+  com.fptu.math_master.dto.response.AssessmentSourcePdfUrlResponse getImportSourcePdfUrl(UUID id);
+
   Page<AssessmentResponse> getMyAssessments(AssessmentStatus status, String search, Pageable pageable);
 
   List<AssessmentResponse> searchAssessmentsByName(String name, AssessmentStatus status);

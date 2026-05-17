@@ -1,7 +1,6 @@
 package com.fptu.math_master.service.impl;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fptu.math_master.dto.request.CreateQuestionRequest;
 import com.fptu.math_master.dto.request.PdfAssessmentImportFormInput;
@@ -29,12 +28,15 @@ import com.fptu.math_master.repository.AssessmentRepository;
 import com.fptu.math_master.repository.QuestionBankRepository;
 import com.fptu.math_master.repository.SchoolGradeRepository;
 import com.fptu.math_master.repository.SubjectRepository;
+import com.fptu.math_master.configuration.properties.MinioProperties;
+import com.fptu.math_master.dto.response.AssessmentPdfExtractResponse;
 import com.fptu.math_master.service.AssessmentImportConfigService;
 import com.fptu.math_master.service.AssessmentImportService;
 import com.fptu.math_master.service.AssessmentService;
-import com.fptu.math_master.service.GeminiService;
+import com.fptu.math_master.service.PythonCrawlerClient;
 import com.fptu.math_master.service.QuestionService;
 import com.fptu.math_master.service.TemplateImportService;
+import com.fptu.math_master.service.UploadService;
 import com.fptu.math_master.util.SecurityUtils;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -63,10 +65,11 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
   private static final int TEXT_PREVIEW_LIMIT = 500;
   private static final String REVIEW_PLACEHOLDER = "REVIEW_REQUIRED";
   private static final String PDF_IMPORT_SOURCE = "PDF_IMPORT";
+  private static final String PDF_IMPORT_MINIO_PREFIX = "assessments/pdf-imports";
 
   TemplateImportService templateImportService;
-  GeminiService geminiService;
   ObjectMapper objectMapper;
+  PythonCrawlerClient pythonCrawlerClient;
   QuestionService questionService;
   AssessmentService assessmentService;
   AssessmentRepository assessmentRepository;
@@ -75,6 +78,8 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
   AssessmentImportConfigService assessmentImportConfigService;
   SchoolGradeRepository schoolGradeRepository;
   SubjectRepository subjectRepository;
+  UploadService uploadService;
+  MinioProperties minioProperties;
 
   @Override
   @Transactional
@@ -113,16 +118,11 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     }
 
     String sourceFile = file.getOriginalFilename();
-    String subjectHint = resolveSubjectHint(form);
-    String contextHint = form.contextHint();
 
-    String extractedText = templateImportService.extractTextFromFile(file);
-    if (extractedText == null || extractedText.trim().isEmpty()) {
-      throw new AppException(ErrorCode.INVALID_KEY, "Không trích xuất được nội dung từ file PDF");
-    }
-
-    ParsedExamPayload payload =
-        analyzeExamWithAI(extractedText, subjectHint, contextHint, sourceFile, form.pdfLayout());
+    AssessmentPdfExtractResponse pythonExtract = resolvePythonExtract(file, form, sourceFile);
+    ParsedExamPayload payload = mapPythonExtract(pythonExtract, sourceFile);
+    String extractedText =
+        pythonExtract.getExtractedText() != null ? pythonExtract.getExtractedText() : "";
     PdfImportedExamDto exam = mergeExamWithForm(payload.exam(), form, sourceFile);
     List<PdfImportedQuestionDto> questions = payload.questions();
 
@@ -159,6 +159,16 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
             .build();
     assessment = assessmentRepository.save(assessment);
 
+    try {
+      persistSourcePdfToMinio(assessment, file, sourceFile);
+    } catch (Exception ex) {
+      log.error("Failed to store source PDF on MinIO for assessment {}", assessment.getId(), ex);
+      assessmentRepository.delete(assessment);
+      throw new AppException(
+          ErrorCode.INVALID_KEY,
+          "Không lưu được file PDF lên kho lưu trữ. Kiểm tra MinIO đang chạy và thử lại.");
+    }
+
     List<AssessmentImportResponse.ParsedQuestionPreview> previews = new ArrayList<>();
     int imported = 0;
     int skipped = 0;
@@ -189,7 +199,7 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
                 .explanation(
                     parsed.getSolution() != null && !parsed.getSolution().isBlank()
                         ? parsed.getSolution().trim()
-                        : "Import từ PDF — vui lòng bổ sung đáp án/lời giải nếu cần")
+                        : "Trích bằng Mathpix — chỉnh đáp án/lời giải khi rà soát đề")
                 .points(points)
                 .cognitiveLevel(CognitiveLevel.VAN_DUNG)
                 .questionBankId(questionBankId)
@@ -201,7 +211,12 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
                 .diagramData(buildDiagramPayload(parsed))
                 .generationMetadata(
                     buildQuestionGenerationMetadata(
-                        exam, parsed, assessment.getId(), sourceFile, form))
+                        exam,
+                        parsed,
+                        assessment.getId(),
+                        sourceFile,
+                        form,
+                        assessment.getSourcePdfPath()))
                 .build();
 
         QuestionResponse created = questionService.createQuestion(createRequest);
@@ -226,6 +241,7 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     }
 
     if (imported == 0) {
+      deleteSourcePdfFromMinio(assessment);
       assessmentRepository.delete(assessment);
       throw new AppException(
           ErrorCode.INVALID_KEY,
@@ -239,7 +255,7 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
       warnings.add("Đã bỏ qua " + skipped + " mục không đủ nội dung hoặc lỗi khi lưu.");
     }
     warnings.add(
-        "Đề tự luận/PDF: giữ cả raw_text và math_latex/table_data trong metadata — cần rà soát trước khi công khai.");
+        "Đề import qua Mathpix (Python): chỉnh nội dung/đáp án từng câu trước khi công khai.");
 
     return AssessmentImportResponse.builder()
         .analysisSuccessful(payload.analysisSuccessful())
@@ -254,301 +270,80 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
         .build();
   }
 
-  private ParsedExamPayload analyzeExamWithAI(
-      String text, String subjectHint, String contextHint, String sourceFile, String pdfLayout) {
-    try {
-      String prompt = buildExamAnalysisPrompt(text, subjectHint, contextHint, pdfLayout);
-      String aiResponse = geminiService.sendMessage(prompt);
-      return parseExamAnalysis(aiResponse, text, sourceFile);
-    } catch (Exception ex) {
-      log.error("AI exam import failed: {}", ex.getMessage(), ex);
-      return fallbackParse(text, sourceFile);
-    }
-  }
-
-  private String buildExamAnalysisPrompt(
-      String text, String subjectHint, String contextHint, String pdfLayout) {
-    StringBuilder prompt = new StringBuilder();
-    prompt.append("# ROLE\n");
-    prompt.append(
-        "You are a Vietnamese mathematics exam PDF parser. Split data into EXAM-level fields and QUESTION-level fields.\n");
-    prompt.append("Output ONLY valid JSON (no markdown fences).\n\n");
-    prompt.append("# PDF DOCUMENT LAYOUT\n");
-    if ("questions_with_answers".equals(pdfLayout)) {
-      prompt.append(
-          "Layout: QUESTIONS_WITH_ANSWERS — the PDF contains exam questions AND a separate answer key and/or solutions section (often at the end).\n");
-      prompt.append(
-          "- Extract answer_key and solution for each question when present in the answer section.\n");
-      prompt.append(
-          "- Map answers to the correct question by label (Câu I.1, Câu 2, …). Do not guess.\n");
-    } else {
-      prompt.append(
-          "Layout: QUESTIONS_ONLY — the PDF contains exam questions only (no dedicated answer key section).\n");
-      prompt.append(
-          "- Omit answer_key and solution unless clearly stated inline with the question.\n");
-    }
-    prompt.append("\n");
-    prompt.append("# EXAM-LEVEL FIELDS (object \"exam\")\n");
-    prompt.append(
-        "exam_title, school_year, department (legacy), subject, exam_date, duration_minutes, ");
-    prompt.append("exam_type, total_pages, grade_level, raw_header_text, ");
-    prompt.append(
-        "exam_scope (national|province_city|district|school|organization|internal), ");
-    prompt.append(
-        "organizer_name, organizer_type (department_of_education|school|university|exam_board|...), ");
-    prompt.append("province_city, district, school_name, country.\n\n");
-    prompt.append("# QUESTION-LEVEL FIELDS (array \"questions\")\n");
-    prompt.append("Each item is one gradable unit (e.g. Câu I.1, Câu I.2, Câu II):\n");
-    prompt.append(
-        "section_label (Câu I), section_score, sub_question_label (1,2), question_text, ");
-    prompt.append(
-        "question_type (tu_luan|trac_nghiem|bang_so_lieu|bieu_thuc|xac_suat|...), points, ");
-    prompt.append("order_index, page_number, has_table, table_data {table_title, headers, rows}, ");
-    prompt.append("math_latex (array of LaTeX strings), conditions, task, raw_text, ");
-    prompt.append("answer_key, solution, difficulty, topic_tags, images.\n\n");
-    prompt.append("# RULES\n");
-    prompt.append("- Preserve Vietnamese diacritics and math in raw_text.\n");
-    prompt.append("- Normalize formulas to LaTeX in math_latex.\n");
-    prompt.append("- For tables: headers + rows exactly as in the document.\n");
-    prompt.append("- Keep section groups (Câu I, Câu II) on each sub-question.\n");
-    prompt.append("- If answer unknown, omit answer_key (do not guess).\n\n");
-    if (subjectHint != null && !subjectHint.isBlank()) {
-      prompt.append("Subject hint: ").append(subjectHint).append("\n");
-    }
-    if (contextHint != null && !contextHint.isBlank()) {
-      prompt.append("Context hint: ").append(contextHint).append("\n");
-    }
-    prompt.append("\n# DOCUMENT\n").append(text).append("\n\n");
-    prompt.append(
-        """
-        Return JSON shape:
-        {
-          "analysisSuccessful": true,
-          "confidenceScore": 0.85,
-          "warnings": [],
-          "exam": {
-            "exam_title": "...",
-            "school_year": "2025 - 2026",
-            "department": "...",
-            "exam_scope": "province_city",
-            "organizer_name": "Sở Giáo dục và Đào tạo Hà Nội",
-            "organizer_type": "department_of_education",
-            "province_city": "Hà Nội",
-            "district": null,
-            "school_name": null,
-            "country": "Việt Nam",
-            "subject": "Toán",
-            "exam_date": "08/6/2025",
-            "duration_minutes": 120,
-            "exam_type": "Đề chính thức",
-            "total_pages": 2,
-            "grade_level": "Lớp 10",
-            "raw_header_text": "..."
-          },
-          "questions": [
-            {
-              "section_label": "Câu I",
-              "section_score": 1.5,
-              "sub_question_label": "1",
-              "question_type": "bang_so_lieu",
-              "question_text": "...",
-              "table_data": {"headers": ["..."], "rows": [["...", 17]]},
-              "task": "...",
-              "raw_text": "...",
-              "order_index": 1,
-              "page_number": 1
-            }
-          ]
+  private AssessmentPdfExtractResponse resolvePythonExtract(
+      MultipartFile file, PdfAssessmentImportFormInput form, String sourceFile) {
+    String pre = form.preExtractedJson();
+    if (pre != null && !pre.isBlank()) {
+      try {
+        AssessmentPdfExtractResponse parsed =
+            objectMapper.readValue(pre, AssessmentPdfExtractResponse.class);
+        if (parsed.getExam() != null
+            && (parsed.getExam().getSourceFile() == null
+                || parsed.getExam().getSourceFile().isBlank())) {
+          parsed.getExam().setSourceFile(sourceFile);
         }
-        """);
-    return prompt.toString();
-  }
-
-  private ParsedExamPayload parseExamAnalysis(
-      String aiResponse, String originalText, String sourceFile) {
-    try {
-      String json = extractJSON(aiResponse);
-      if (json == null || json.isBlank()) {
-        return fallbackParse(originalText, sourceFile);
-      }
-      JsonNode root = objectMapper.readTree(json);
-      boolean ok = root.path("analysisSuccessful").asBoolean(true);
-      double confidence = root.path("confidenceScore").asDouble(0.5);
-      List<String> warnings = parseStringArray(root.path("warnings"));
-
-      PdfImportedExamDto exam = parseExamDto(root.path("exam"), sourceFile);
-      if (exam.getRawHeaderText() == null || exam.getRawHeaderText().isBlank()) {
-        exam.setRawHeaderText(guessHeaderFromText(originalText));
-      }
-
-      List<PdfImportedQuestionDto> questions = parseQuestions(root.path("questions"));
-      return new ParsedExamPayload(ok, confidence, warnings, exam, questions);
-    } catch (Exception ex) {
-      log.warn("Failed to parse AI exam JSON: {}", ex.getMessage());
-      return fallbackParse(originalText, sourceFile);
-    }
-  }
-
-  private PdfImportedExamDto parseExamDto(JsonNode node, String sourceFile) {
-    if (node == null || node.isMissingNode()) {
-      return PdfImportedExamDto.builder().sourceFile(sourceFile).build();
-    }
-    return PdfImportedExamDto.builder()
-        .examTitle(textOrNull(node, "exam_title"))
-        .schoolYear(textOrNull(node, "school_year"))
-        .department(textOrNull(node, "department"))
-        .examScope(textOrNull(node, "exam_scope"))
-        .organizerName(textOrNull(node, "organizer_name"))
-        .organizerType(textOrNull(node, "organizer_type"))
-        .provinceCity(textOrNull(node, "province_city"))
-        .district(textOrNull(node, "district"))
-        .schoolName(textOrNull(node, "school_name"))
-        .country(textOrNull(node, "country"))
-        .subject(textOrNull(node, "subject"))
-        .examDate(textOrNull(node, "exam_date"))
-        .durationMinutes(intOrNull(node, "duration_minutes"))
-        .examType(textOrNull(node, "exam_type"))
-        .totalPages(intOrNull(node, "total_pages"))
-        .gradeLevel(textOrNull(node, "grade_level"))
-        .sourceFile(sourceFile)
-        .rawHeaderText(textOrNull(node, "raw_header_text"))
-        .build();
-  }
-
-  private List<PdfImportedQuestionDto> parseQuestions(JsonNode questionsNode) {
-    List<PdfImportedQuestionDto> result = new ArrayList<>();
-    if (!questionsNode.isArray()) {
-      return result;
-    }
-    int fallbackOrder = 1;
-    for (JsonNode node : questionsNode) {
-      PdfImportedQuestionDto dto = parseQuestionNode(node, fallbackOrder);
-      if (dto != null) {
-        result.add(dto);
-        fallbackOrder++;
+        return parsed;
+      } catch (Exception ex) {
+        log.warn("Invalid preExtractedJson, falling back to Python OCR: {}", ex.getMessage());
       }
     }
-    return result;
+    return pythonCrawlerClient.extractAssessmentFromPdf(file, form.pdfLayout(), sourceFile);
   }
 
-  private PdfImportedQuestionDto parseQuestionNode(JsonNode node, int fallbackOrder) {
-    String questionText = textOrNull(node, "question_text");
-    String rawText = textOrNull(node, "raw_text");
-    if ((questionText == null || questionText.isBlank()) && (rawText == null || rawText.isBlank())) {
-      return null;
+  private ParsedExamPayload mapPythonExtract(
+      AssessmentPdfExtractResponse response, String sourceFile) {
+    if (response == null || response.getQuestions() == null || response.getQuestions().isEmpty()) {
+      throw new AppException(
+          ErrorCode.INVALID_KEY,
+          "Không trích được nội dung theo trang. Hoàn tất OCR ở bước 2 hoặc kiểm tra file PDF.");
     }
-
-    Map<String, Object> rawPayload = objectMapper.convertValue(node, new TypeReference<>() {});
-    Integer orderIdx = intOrNull(node, "order_index");
-
-    return PdfImportedQuestionDto.builder()
-        .orderIndex(orderIdx != null ? orderIdx : fallbackOrder)
-        .sectionLabel(textOrNull(node, "section_label"))
-        .sectionScore(decimalOrNull(node, "section_score"))
-        .subQuestionLabel(textOrNull(node, "sub_question_label"))
-        .questionText(questionText)
-        .questionType(textOrNull(node, "question_type"))
-        .points(decimalOrNull(node, "points"))
-        .pageNumber(intOrNull(node, "page_number"))
-        .hasTable(node.path("has_table").asBoolean(node.has("table_data")))
-        .tableData(parseTableData(node.path("table_data")))
-        .mathLatex(parseStringList(node.path("math_latex")))
-        .conditions(textOrNull(node, "conditions"))
-        .task(textOrNull(node, "task"))
-        .rawText(rawText)
-        .answerKey(textOrNull(node, "answer_key"))
-        .solution(textOrNull(node, "solution"))
-        .difficulty(textOrNull(node, "difficulty"))
-        .topicTags(parseStringList(node.path("topic_tags")))
-        .images(parseStringList(node.path("images")))
-        .rawImportPayload(rawPayload)
-        .build();
-  }
-
-  private PdfImportedTableDataDto parseTableData(JsonNode node) {
-    if (node == null || node.isMissingNode() || node.isNull()) {
-      return null;
+    PdfImportedExamDto exam = response.getExam();
+    if (exam == null) {
+      exam = PdfImportedExamDto.builder().sourceFile(sourceFile).build();
+    } else if (exam.getSourceFile() == null || exam.getSourceFile().isBlank()) {
+      exam.setSourceFile(sourceFile);
     }
-    List<String> headers = new ArrayList<>();
-    if (node.path("headers").isArray()) {
-      node.path("headers").forEach(h -> headers.add(h.asText()));
-    }
-    List<List<Object>> rows = new ArrayList<>();
-    if (node.path("rows").isArray()) {
-      node.path("rows").forEach(rowNode -> {
-        List<Object> row = new ArrayList<>();
-        if (rowNode.isArray()) {
-          rowNode.forEach(cell -> row.add(parseCell(cell)));
-        }
-        rows.add(row);
-      });
-    }
-    return PdfImportedTableDataDto.builder()
-        .tableTitle(textOrNull(node, "table_title"))
-        .headers(headers.isEmpty() ? null : headers)
-        .rows(rows.isEmpty() ? null : rows)
-        .tableRawHtml(textOrNull(node, "table_raw_html"))
-        .tableMarkdown(textOrNull(node, "table_markdown"))
-        .build();
-  }
-
-  private Object parseCell(JsonNode cell) {
-    if (cell.isNumber()) {
-      return cell.numberValue();
-    }
-    return cell.asText();
-  }
-
-  private ParsedExamPayload fallbackParse(String text, String sourceFile) {
-    List<PdfImportedQuestionDto> questions = new ArrayList<>();
     List<String> warnings =
-        List.of("Phân tích AI thất bại — đã tách câu theo nhãn Câu/Bài cơ bản.");
-    String header = guessHeaderFromText(text);
-    PdfImportedExamDto exam =
-        PdfImportedExamDto.builder()
-            .examTitle("Đề import từ PDF")
-            .sourceFile(sourceFile)
-            .rawHeaderText(header)
-            .build();
-
-    String[] blocks = text.split("(?=(?i)(?:Câu|Bài)\\s+[IVXLC\\d]+)");
-    int order = 1;
-    for (String block : blocks) {
-      String trimmed = block.trim();
-      if (trimmed.length() < 15) {
-        continue;
-      }
-      String section = trimmed.split("\\n")[0].trim();
-      questions.add(
-          PdfImportedQuestionDto.builder()
-              .orderIndex(order++)
-              .sectionLabel(section.length() < 40 ? section : null)
-              .questionText(trimmed)
-              .rawText(trimmed)
-              .questionType("tu_luan")
-              .build());
-    }
-    return new ParsedExamPayload(false, 0.3, warnings, exam, questions);
+        response.getWarnings() != null ? new ArrayList<>(response.getWarnings()) : new ArrayList<>();
+    double confidence =
+        response.getConfidenceScore() != null ? response.getConfidenceScore() : 0.75;
+    return new ParsedExamPayload(
+        response.isAnalysisSuccessful(),
+        confidence,
+        warnings,
+        exam,
+        response.getQuestions());
   }
 
-  private String guessHeaderFromText(String text) {
-    if (text == null) {
-      return null;
+  private void persistSourcePdfToMinio(
+      Assessment assessment, MultipartFile file, String originalFileName) {
+    String directory = PDF_IMPORT_MINIO_PREFIX + "/" + assessment.getId();
+    String objectKey =
+        uploadService.uploadFile(file, directory, minioProperties.getTemplateBucket());
+    assessment.setSourcePdfPath(objectKey);
+    assessment.setSourcePdfOriginalName(originalFileName);
+    assessmentRepository.save(assessment);
+    log.info(
+        "Stored import source PDF for assessment {} at {}/{}",
+        assessment.getId(),
+        minioProperties.getTemplateBucket(),
+        objectKey);
+  }
+
+  private void deleteSourcePdfFromMinio(Assessment assessment) {
+    String key = assessment.getSourcePdfPath();
+    if (key == null || key.isBlank()) {
+      return;
     }
-    String[] lines = text.split("\\n");
-    StringBuilder header = new StringBuilder();
-    int limit = Math.min(lines.length, 12);
-    for (int i = 0; i < limit; i++) {
-      String line = lines[i].trim();
-      if (line.isEmpty()) {
-        if (header.length() > 0) {
-          break;
-        }
-        continue;
-      }
-      header.append(line).append("\n");
+    try {
+      uploadService.deleteFile(key.trim(), minioProperties.getTemplateBucket());
+    } catch (Exception ex) {
+      log.warn(
+          "Could not delete source PDF {} for assessment {}: {}",
+          key,
+          assessment.getId(),
+          ex.getMessage());
     }
-    return header.toString().trim();
   }
 
   private boolean isImportable(PdfImportedQuestionDto parsed) {
@@ -657,7 +452,8 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
       PdfImportedQuestionDto parsed,
       UUID assessmentId,
       String sourceFile,
-      PdfAssessmentImportFormInput form) {
+      PdfAssessmentImportFormInput form,
+      String sourcePdfPath) {
     Map<String, Object> meta = new LinkedHashMap<>();
     meta.put("source", PDF_IMPORT_SOURCE);
     meta.put("assessmentId", assessmentId.toString());
@@ -669,6 +465,10 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
       if (form.importContentMode() != null && !form.importContentMode().isBlank()) {
         meta.put("importContentMode", form.importContentMode());
       }
+    }
+    if (sourcePdfPath != null && !sourcePdfPath.isBlank()) {
+      meta.put("sourcePdfPath", sourcePdfPath);
+      meta.put("sourcePdfBucket", minioProperties.getTemplateBucket());
     }
     if (parsed.getPageNumber() != null) {
       meta.put("pageNumber", parsed.getPageNumber());
@@ -766,61 +566,6 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
     return parsed.getSectionLabel().trim();
   }
 
-  private String textOrNull(JsonNode node, String field) {
-    JsonNode v = node.path(field);
-    if (v.isMissingNode() || v.isNull()) {
-      return null;
-    }
-    String text = v.asText().trim();
-    return text.isEmpty() ? null : text;
-  }
-
-  private Integer intOrNull(JsonNode node, String field) {
-    JsonNode v = node.path(field);
-    if (v.isMissingNode() || v.isNull() || !v.canConvertToInt()) {
-      return null;
-    }
-    return v.asInt();
-  }
-
-  private BigDecimal decimalOrNull(JsonNode node, String field) {
-    JsonNode v = node.path(field);
-    if (v.isMissingNode() || v.isNull() || !v.isNumber()) {
-      return null;
-    }
-    return BigDecimal.valueOf(v.asDouble());
-  }
-
-  private List<String> parseStringList(JsonNode node) {
-    List<String> result = new ArrayList<>();
-    if (node != null && node.isArray()) {
-      node.forEach(item -> {
-        String s = item.asText().trim();
-        if (!s.isEmpty()) {
-          result.add(s);
-        }
-      });
-    }
-    return result.isEmpty() ? null : result;
-  }
-
-  private List<String> parseStringArray(JsonNode node) {
-    List<String> list = parseStringList(node);
-    return list != null ? list : new ArrayList<>();
-  }
-
-  private String extractJSON(String content) {
-    if (content == null || content.trim().isEmpty()) {
-      return null;
-    }
-    int startIdx = content.indexOf('{');
-    int endIdx = content.lastIndexOf('}');
-    if (startIdx >= 0 && endIdx > startIdx) {
-      return content.substring(startIdx, endIdx + 1);
-    }
-    return content.trim();
-  }
-
   private String resolveTitle(String requested, String suggested, String filename) {
     if (requested != null && !requested.isBlank()) {
       return requested.trim();
@@ -842,24 +587,6 @@ public class AssessmentImportServiceImpl implements AssessmentImportService {
       return text;
     }
     return text.substring(0, TEXT_PREVIEW_LIMIT) + "…";
-  }
-
-  private String resolveSubjectHint(PdfAssessmentImportFormInput form) {
-    if (form.subjectId() == null) {
-      return null;
-    }
-    Subject subject =
-        subjectRepository
-            .findById(form.subjectId())
-            .orElseThrow(() -> new AppException(ErrorCode.SUBJECT_NOT_FOUND));
-    if (form.schoolGradeId() != null) {
-      SchoolGrade grade =
-          schoolGradeRepository
-              .findById(form.schoolGradeId())
-              .orElseThrow(() -> new AppException(ErrorCode.SCHOOL_GRADE_NOT_FOUND));
-      return grade.getName() + " — " + subject.getName();
-    }
-    return subject.getName();
   }
 
   private PdfImportedExamDto mergeExamWithForm(

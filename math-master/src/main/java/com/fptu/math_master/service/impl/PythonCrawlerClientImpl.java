@@ -3,6 +3,7 @@ package com.fptu.math_master.service.impl;
 import com.fptu.math_master.configuration.properties.MinioProperties;
 import com.fptu.math_master.dto.request.UpdateLessonPageRequest;
 import com.fptu.math_master.dto.response.ContentBlockDto;
+import com.fptu.math_master.dto.response.AssessmentPdfExtractResponse;
 import com.fptu.math_master.dto.response.LessonPageHistoryEntryResponse;
 import com.fptu.math_master.dto.response.LessonPageResponse;
 import com.fptu.math_master.exception.AppException;
@@ -21,8 +22,12 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
@@ -37,16 +42,301 @@ public class PythonCrawlerClientImpl implements PythonCrawlerClient {
   private static final String STATIC_PROXY_PREFIX = "/api/v1/crawl-data/static/";
 
   private final RestClient restClient;
+  private final RestClient longRestClient;
   private final UploadService uploadService;
   private final MinioProperties minioProperties;
 
   public PythonCrawlerClientImpl(
       @Qualifier("crawlDataRestClient") RestClient restClient,
+      @Qualifier("crawlDataLongRestClient") RestClient longRestClient,
       UploadService uploadService,
       MinioProperties minioProperties) {
     this.restClient = restClient;
+    this.longRestClient = longRestClient;
     this.uploadService = uploadService;
     this.minioProperties = minioProperties;
+  }
+
+  @Override
+  public com.fptu.math_master.dto.response.AssessmentPdfInfoResponse getAssessmentPdfInfo(
+      org.springframework.web.multipart.MultipartFile file, String fileKey, String draftId) {
+    long startedMs = System.currentTimeMillis();
+    String filename = safePdfFilename(file);
+    log.info("Assessment PDF import [pdf-info]: đếm trang — file={}", filename);
+    String ownerId = currentUserIdString();
+    com.fptu.math_master.dto.response.AssessmentPdfInfoResponse result =
+        postAssessmentPdfMultipart(
+            "/assessments/pdf-info",
+            file,
+            b -> addPdfDraftFields(b, ownerId, fileKey, draftId),
+            com.fptu.math_master.dto.response.AssessmentPdfInfoResponse.class,
+            "Không đọc được thông tin PDF");
+    log.info(
+        "Assessment PDF import [pdf-info]: xong — {} trang, file={}, {}ms",
+        result.getTotalPages(),
+        result.getSourceFile() != null ? result.getSourceFile() : filename,
+        System.currentTimeMillis() - startedMs);
+    return result;
+  }
+
+  @Override
+  public com.fptu.math_master.dto.response.AssessmentPdfOcrPageResponse ocrAssessmentPdfPage(
+      org.springframework.web.multipart.MultipartFile file,
+      int pageNumber,
+      String fileKey,
+      String draftId) {
+    long startedMs = System.currentTimeMillis();
+    String filename = safePdfFilename(file);
+    log.info(
+        "Assessment PDF import [ocr-pdf-page]: bắt đầu trang {} — file={}",
+        pageNumber,
+        filename);
+    String ownerId = currentUserIdString();
+    com.fptu.math_master.dto.response.AssessmentPdfOcrPageResponse result =
+        postAssessmentPdfMultipart(
+            "/assessments/ocr-pdf-page",
+            file,
+            b -> {
+              b.add("pageNumber", String.valueOf(pageNumber));
+              addPdfDraftFields(b, ownerId, fileKey, draftId);
+            },
+            com.fptu.math_master.dto.response.AssessmentPdfOcrPageResponse.class,
+            "OCR trang PDF thất bại");
+    int textLen = result.getText() != null ? result.getText().length() : 0;
+    log.info(
+        "Assessment PDF import [ocr-pdf-page]: xong trang {} — {}ms, success={}, source={}, confidence={}, chars={}",
+        pageNumber,
+        System.currentTimeMillis() - startedMs,
+        result.isSuccess(),
+        result.getOcrSource(),
+        result.getConfidence(),
+        textLen);
+    return result;
+  }
+
+  @Override
+  public com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse getPdfImportDraft(
+      String draftId) {
+    String ownerId = currentUserIdString();
+    try {
+      com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse result =
+          longRestClient
+              .get()
+              .uri(
+                  BASE
+                      + "/assessments/pdf-import-draft/{draftId}?ownerId={ownerId}",
+                  draftId,
+                  ownerId)
+              .retrieve()
+              .body(com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse.class);
+      if (result == null) {
+        throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE);
+      }
+      return result;
+    } catch (org.springframework.web.client.RestClientResponseException ex) {
+      if (ex.getStatusCode() == org.springframework.http.HttpStatus.NOT_FOUND) {
+        return null;
+      }
+      throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE, parsePythonDetail(ex.getResponseBodyAsString()));
+    } catch (Exception ex) {
+      throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE, ex.getMessage());
+    }
+  }
+
+  @Override
+  public com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse
+      getPdfImportDraftByFileKey(String fileKey) {
+    String ownerId = currentUserIdString();
+    try {
+      return longRestClient
+          .get()
+          .uri(
+              BASE + "/assessments/pdf-import-draft?ownerId={ownerId}&fileKey={fileKey}",
+              ownerId,
+              fileKey)
+          .retrieve()
+          .body(com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse.class);
+    } catch (org.springframework.web.client.RestClientResponseException ex) {
+      if (ex.getStatusCode() == org.springframework.http.HttpStatus.NOT_FOUND) {
+        return null;
+      }
+      throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE, parsePythonDetail(ex.getResponseBodyAsString()));
+    } catch (Exception ex) {
+      throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE, ex.getMessage());
+    }
+  }
+
+  private static void addPdfDraftFields(
+      org.springframework.util.MultiValueMap<String, Object> body,
+      String ownerId,
+      String fileKey,
+      String draftId) {
+    if (ownerId != null && !ownerId.isBlank()) {
+      body.add("ownerId", ownerId);
+    }
+    if (fileKey != null && !fileKey.isBlank()) {
+      body.add("fileKey", fileKey);
+    }
+    if (draftId != null && !draftId.isBlank()) {
+      body.add("draftId", draftId);
+    }
+  }
+
+  private static String currentUserIdString() {
+    return com.fptu.math_master.util.SecurityUtils.getCurrentUserId().toString();
+  }
+
+  private static String safePdfFilename(org.springframework.web.multipart.MultipartFile file) {
+    if (file == null) {
+      return "exam.pdf";
+    }
+    String name = file.getOriginalFilename();
+    return name != null && !name.isBlank() ? name : "exam.pdf";
+  }
+
+  private <T> T postAssessmentPdfMultipart(
+      String path,
+      org.springframework.web.multipart.MultipartFile file,
+      java.util.function.Consumer<org.springframework.util.MultiValueMap<String, Object>> extra,
+      Class<T> responseType,
+      String errorPrefix) {
+    try {
+      byte[] bytes = file.getBytes();
+      String filename = file.getOriginalFilename();
+      org.springframework.core.io.ByteArrayResource resource =
+          new org.springframework.core.io.ByteArrayResource(bytes) {
+            @Override
+            public String getFilename() {
+              return filename != null ? filename : "exam.pdf";
+            }
+          };
+      org.springframework.util.LinkedMultiValueMap<String, Object> body =
+          new org.springframework.util.LinkedMultiValueMap<>();
+      body.add("file", resource);
+      if (extra != null) {
+        extra.accept(body);
+      }
+      T result =
+          longRestClient
+              .post()
+              .uri(BASE + path)
+              .contentType(org.springframework.http.MediaType.MULTIPART_FORM_DATA)
+              .body(body)
+              .retrieve()
+              .body(responseType);
+      if (result == null) {
+        throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE);
+      }
+      return result;
+    } catch (AppException ex) {
+      throw ex;
+    } catch (org.springframework.web.client.ResourceAccessException ex) {
+      log.error("Python service unreachable for {}", path, ex);
+      throw new AppException(
+          ErrorCode.CRAWLER_UNAVAILABLE,
+          "Không kết nối được service Python. Chạy math_learning_AI trên cổng 8001.");
+    } catch (org.springframework.web.client.RestClientResponseException ex) {
+      log.error("Python {} returned {}: {}", path, ex.getStatusCode(), ex.getResponseBodyAsString());
+      String detail = parsePythonDetail(ex.getResponseBodyAsString());
+      if (ex.getStatusCode() == org.springframework.http.HttpStatus.BAD_REQUEST) {
+        throw new AppException(ErrorCode.INVALID_KEY, detail);
+      }
+      throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE, errorPrefix + ": " + detail);
+    } catch (Exception ex) {
+      log.error("{} failed", path, ex);
+      throw new AppException(ErrorCode.INVALID_KEY, errorPrefix + ": " + ex.getMessage());
+    }
+  }
+
+  @Override
+  public AssessmentPdfExtractResponse extractAssessmentFromPdf(
+      MultipartFile file, String pdfLayout, String sourceFileName) {
+    long startedMs = System.currentTimeMillis();
+    String filename = safePdfFilename(file);
+    log.info(
+        "Assessment PDF import [extract-pdf]: gọi Python OCR toàn bộ — file={}, layout={}",
+        filename,
+        pdfLayout);
+    try {
+      byte[] bytes = file.getBytes();
+      String uploadFilename =
+          sourceFileName != null && !sourceFileName.isBlank()
+              ? sourceFileName
+              : file.getOriginalFilename();
+      ByteArrayResource resource =
+          new ByteArrayResource(bytes) {
+            @Override
+            public String getFilename() {
+              return uploadFilename != null ? uploadFilename : "exam.pdf";
+            }
+          };
+
+      MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+      body.add("file", resource);
+      body.add("pdfLayout", pdfLayout != null ? pdfLayout : "questions_only");
+      if (sourceFileName != null && !sourceFileName.isBlank()) {
+        body.add("sourceFileName", sourceFileName);
+      }
+
+      AssessmentPdfExtractResponse result =
+          longRestClient
+              .post()
+              .uri(BASE + "/assessments/extract-pdf")
+              .contentType(MediaType.MULTIPART_FORM_DATA)
+              .body(body)
+              .retrieve()
+              .body(AssessmentPdfExtractResponse.class);
+      if (result == null) {
+        throw new AppException(ErrorCode.CRAWLER_UNAVAILABLE);
+      }
+      int questionCount =
+          result.getQuestions() != null ? result.getQuestions().size() : 0;
+      log.info(
+          "Assessment PDF import [extract-pdf]: xong — {}ms, questions={}, confidence={}, warnings={}",
+          System.currentTimeMillis() - startedMs,
+          questionCount,
+          result.getConfidenceScore(),
+          result.getWarnings() != null ? result.getWarnings().size() : 0);
+      return result;
+    } catch (AppException ex) {
+      throw ex;
+    } catch (ResourceAccessException ex) {
+      log.error("Python service unreachable for assessment PDF extract", ex);
+      throw new AppException(
+          ErrorCode.CRAWLER_UNAVAILABLE,
+          "Không kết nối được service Python (Mathpix). Chạy math_learning_AI trên cổng 8001.");
+    } catch (RestClientResponseException ex) {
+      log.error(
+          "Python assessment extract returned {}: {}",
+          ex.getStatusCode(),
+          ex.getResponseBodyAsString());
+      String detail = ex.getResponseBodyAsString();
+      if (ex.getStatusCode() == HttpStatus.BAD_REQUEST) {
+        throw new AppException(ErrorCode.INVALID_KEY, parsePythonDetail(detail));
+      }
+      throw new AppException(
+          ErrorCode.CRAWLER_UNAVAILABLE,
+          "Trích PDF qua Python thất bại: " + parsePythonDetail(detail));
+    } catch (Exception ex) {
+      log.error("Assessment PDF extract failed", ex);
+      throw new AppException(ErrorCode.INVALID_KEY, "Trích PDF thất bại: " + ex.getMessage());
+    }
+  }
+
+  private String parsePythonDetail(String body) {
+    if (body == null || body.isBlank()) {
+      return "Lỗi không xác định từ Python";
+    }
+    if (body.contains("\"detail\"")) {
+      int idx = body.indexOf("\"detail\"");
+      int start = body.indexOf(':', idx) + 1;
+      int q1 = body.indexOf('"', start);
+      int q2 = body.indexOf('"', q1 + 1);
+      if (q1 >= 0 && q2 > q1) {
+        return body.substring(q1 + 1, q2);
+      }
+    }
+    return body.length() > 300 ? body.substring(0, 300) : body;
   }
 
   @Override

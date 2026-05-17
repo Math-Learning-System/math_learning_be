@@ -135,6 +135,7 @@ crawl-data:
   base-url: ${CRAWL_DATA_BASE_URL:http://localhost:8001}
   internal-api-key: ${CRAWL_DATA_INTERNAL_API_KEY:change-me-in-production}
   timeout-seconds: 15
+  assessment-extract-timeout-seconds: 300
 
 ocr:
   async:

@@ -40,4 +40,25 @@ public class CrawlDataConfig {
         .requestFactory(factory)
         .build();
   }
+
+  @Bean(name = "crawlDataLongRestClient")
+  public RestClient crawlDataLongRestClient() {
+    int timeoutMs =
+        (int) Duration.ofSeconds(properties.getAssessmentExtractTimeoutSeconds()).toMillis();
+    RequestConfig requestConfig =
+        RequestConfig.custom()
+            .setConnectTimeout(Timeout.ofMilliseconds(timeoutMs))
+            .setResponseTimeout(Timeout.ofMilliseconds(timeoutMs))
+            .build();
+    CloseableHttpClient httpClient =
+        HttpClients.custom().setDefaultRequestConfig(requestConfig).build();
+    HttpComponentsClientHttpRequestFactory factory =
+        new HttpComponentsClientHttpRequestFactory(httpClient);
+
+    return RestClient.builder()
+        .baseUrl(properties.getBaseUrl())
+        .defaultHeader("X-Internal-API-Key", properties.getInternalApiKey())
+        .requestFactory(factory)
+        .build();
+  }
 }

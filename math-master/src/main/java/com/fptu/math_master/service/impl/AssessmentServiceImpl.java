@@ -12,7 +12,9 @@ import com.fptu.math_master.dto.request.GenerateAssessmentQuestionsRequest;
 import com.fptu.math_master.dto.request.PointsOverrideRequest;
 import com.fptu.math_master.dto.response.AssessmentGenerationResponse;
 import com.fptu.math_master.dto.response.AssessmentQuestionResponse;
+import com.fptu.math_master.configuration.properties.MinioProperties;
 import com.fptu.math_master.dto.response.AssessmentResponse;
+import com.fptu.math_master.dto.response.AssessmentSourcePdfUrlResponse;
 import com.fptu.math_master.dto.response.AssessmentSummary;
 import com.fptu.math_master.dto.response.CognitiveLevelDistributionResponse;
 import com.fptu.math_master.dto.response.DistributeAssessmentPointsResponse;
@@ -42,6 +44,8 @@ import com.fptu.math_master.exception.ErrorCode;
 import com.fptu.math_master.repository.*;
 import com.fptu.math_master.service.AssessmentService;
 import com.fptu.math_master.service.QuestionSelectionService;
+import com.fptu.math_master.service.UploadService;
+import org.springframework.util.StringUtils;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
@@ -87,6 +91,8 @@ public class AssessmentServiceImpl implements AssessmentService {
   QuestionSelectionService questionSelectionService;
   QuestionRepository questionRepository;
   com.fptu.math_master.service.GradingService gradingService;
+  UploadService uploadService;
+  MinioProperties minioProperties;
 
   @Override
   @Transactional
@@ -557,6 +563,24 @@ public class AssessmentServiceImpl implements AssessmentService {
     }
 
     return mapToResponse(assessment);
+  }
+
+  @Override
+  @Transactional(readOnly = true)
+  public AssessmentSourcePdfUrlResponse getImportSourcePdfUrl(UUID id) {
+    Assessment assessment = loadAssessmentOrThrow(id);
+    validateOwnerOrAdmin(assessment.getTeacherId(), getCurrentUserId());
+    String key = assessment.getSourcePdfPath();
+    if (!StringUtils.hasText(key)) {
+      throw new AppException(ErrorCode.INVALID_REQUEST, "Đề này không có file PDF nguồn từ import.");
+    }
+    String fileName =
+        StringUtils.hasText(assessment.getSourcePdfOriginalName())
+            ? assessment.getSourcePdfOriginalName().trim()
+            : "de-import.pdf";
+    String url =
+        uploadService.getPresignedUrl(key.trim(), minioProperties.getTemplateBucket());
+    return new AssessmentSourcePdfUrlResponse(url, fileName);
   }
 
   @Override
@@ -1247,6 +1271,8 @@ public class AssessmentServiceImpl implements AssessmentService {
         .submissionCount(submissionCount)
         .createdAt(assessment.getCreatedAt())
         .updatedAt(assessment.getUpdatedAt())
+        .sourcePdfPath(assessment.getSourcePdfPath())
+        .sourcePdfOriginalName(assessment.getSourcePdfOriginalName())
         .build();
   }
 

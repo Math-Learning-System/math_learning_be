@@ -29,4 +29,6 @@ public record PdfAssessmentImportFormInput(
     /** Admin-configured id: questions_only | questions_with_answers */
     String pdfLayout,
     /** Admin-configured id: pdf | latex */
-    String importContentMode) {}
+    String importContentMode,
+    /** JSON {@link com.fptu.math_master.dto.response.AssessmentPdfExtractResponse} from wizard step 2 OCR — skips re-extract on import. */
+    String preExtractedJson) {}

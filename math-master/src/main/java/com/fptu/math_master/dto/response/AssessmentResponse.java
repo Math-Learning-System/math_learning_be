@@ -47,7 +47,12 @@ public class AssessmentResponse {
   private Long submissionCount;
   private Instant createdAt;
   private Instant updatedAt;
-  
+
+  /** MinIO object key when đề was created from PDF import. */
+  private String sourcePdfPath;
+  /** Original PDF filename from import. */
+  private String sourcePdfOriginalName;
+
   // BUG FIX #4: Detailed lesson information from matrix
   private List<AssessmentLessonInfo> lessons;
   

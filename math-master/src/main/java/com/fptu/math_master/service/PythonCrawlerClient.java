@@ -91,4 +91,25 @@ public interface PythonCrawlerClient {
 
   /** True iff every page of every (book, lesson) has verified=true. */
   boolean isBookFullyVerified(UUID bookId);
+
+  /**
+   * Mathpix per-page OCR via Python (no Gemini). Used for assessment PDF import (Cách 2).
+   */
+  com.fptu.math_master.dto.response.AssessmentPdfExtractResponse extractAssessmentFromPdf(
+      org.springframework.web.multipart.MultipartFile file, String pdfLayout, String sourceFileName);
+
+  com.fptu.math_master.dto.response.AssessmentPdfInfoResponse getAssessmentPdfInfo(
+      org.springframework.web.multipart.MultipartFile file, String fileKey, String draftId);
+
+  com.fptu.math_master.dto.response.AssessmentPdfOcrPageResponse ocrAssessmentPdfPage(
+      org.springframework.web.multipart.MultipartFile file,
+      int pageNumber,
+      String fileKey,
+      String draftId);
+
+  com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse getPdfImportDraft(
+      String draftId);
+
+  com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse getPdfImportDraftByFileKey(
+      String fileKey);
 }

@@ -18,4 +18,7 @@ public class CrawlDataProperties {
 
   /** Connect/read timeout in seconds. OCR triggers return fast (async), but listing pages may be slower. */
   private int timeoutSeconds = 30;
+
+  /** Timeout for assessment PDF Mathpix extract (multi-page). */
+  private int assessmentExtractTimeoutSeconds = 300;
 }

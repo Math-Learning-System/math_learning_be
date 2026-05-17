@@ -20,6 +20,7 @@ import com.fptu.math_master.dto.response.PercentageBasedGenerationResponse;
 import com.fptu.math_master.dto.response.QuestionResponse;
 import com.fptu.math_master.enums.AssessmentStatus;
 import com.fptu.math_master.dto.response.AssessmentImportResponse;
+import com.fptu.math_master.dto.response.AssessmentSourcePdfUrlResponse;
 import com.fptu.math_master.enums.AssessmentType;
 import com.fptu.math_master.service.AssessmentImportService;
 import com.fptu.math_master.service.AssessmentService;
@@ -51,6 +52,7 @@ public class AssessmentController {
 
   AssessmentService assessmentService;
   AssessmentImportService assessmentImportService;
+  com.fptu.math_master.service.PythonCrawlerClient pythonCrawlerClient;
   com.fptu.math_master.service.AssessmentImportConfigService assessmentImportConfigService;
   com.fptu.math_master.service.QuestionSelectionService questionSelectionService;
 
@@ -63,6 +65,56 @@ public class AssessmentController {
       getImportFormOptions() {
     return ApiResponse.<com.fptu.math_master.dto.response.AssessmentImportFormOptionsResponse>builder()
         .result(assessmentImportConfigService.getFormOptions())
+        .build();
+  }
+
+  @PostMapping(value = "/pdf-info", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "PDF page count for import wizard step 2")
+  public ApiResponse<com.fptu.math_master.dto.response.AssessmentPdfInfoResponse> getPdfInfo(
+      @RequestParam("file") MultipartFile file,
+      @RequestParam(value = "fileKey", required = false) String fileKey,
+      @RequestParam(value = "draftId", required = false) String draftId) {
+    return ApiResponse.<com.fptu.math_master.dto.response.AssessmentPdfInfoResponse>builder()
+        .result(pythonCrawlerClient.getAssessmentPdfInfo(file, fileKey, draftId))
+        .build();
+  }
+
+  @PostMapping(value = "/ocr-pdf-page", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(
+      summary = "OCR one PDF page (Mathpix PDF API)",
+      description =
+          "Mathpix async PDF OCR (no Gemini). First page runs full PDF; later pages use cache.")
+  public ApiResponse<com.fptu.math_master.dto.response.AssessmentPdfOcrPageResponse> ocrPdfPage(
+      @RequestParam("file") MultipartFile file,
+      @RequestParam("pageNumber") int pageNumber,
+      @RequestParam(value = "fileKey", required = false) String fileKey,
+      @RequestParam(value = "draftId", required = false) String draftId) {
+    return ApiResponse.<com.fptu.math_master.dto.response.AssessmentPdfOcrPageResponse>builder()
+        .result(pythonCrawlerClient.ocrAssessmentPdfPage(file, pageNumber, fileKey, draftId))
+        .build();
+  }
+
+  @GetMapping("/pdf-import-draft/{draftId}")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Load OCR wizard draft from MongoDB")
+  public ApiResponse<com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse>
+      getPdfImportDraft(@PathVariable String draftId) {
+    return ApiResponse
+        .<com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse>builder()
+        .result(pythonCrawlerClient.getPdfImportDraft(draftId))
+        .build();
+  }
+
+  @GetMapping("/pdf-import-draft")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(summary = "Load OCR wizard draft by file key")
+  public ApiResponse<com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse>
+      getPdfImportDraftByFileKey(@RequestParam("fileKey") String fileKey) {
+    return ApiResponse
+        .<com.fptu.math_master.dto.response.AssessmentPdfImportDraftResponse>builder()
+        .result(pythonCrawlerClient.getPdfImportDraftByFileKey(fileKey))
         .build();
   }
 
@@ -94,7 +146,8 @@ public class AssessmentController {
       @RequestParam(required = false) AssessmentType assessmentType,
       @RequestParam(required = false) Integer timeLimitMinutes,
       @RequestParam(required = false) String pdfLayout,
-      @RequestParam(required = false) String importContentMode) {
+      @RequestParam(required = false) String importContentMode,
+      @RequestParam(required = false) String preExtractedJson) {
     log.info("REST request to import assessment from PDF: {}", file.getOriginalFilename());
     com.fptu.math_master.dto.request.PdfAssessmentImportFormInput form =
         com.fptu.math_master.dto.request.PdfAssessmentImportFormInput.builder()
@@ -118,6 +171,7 @@ public class AssessmentController {
             .timeLimitMinutes(timeLimitMinutes)
             .pdfLayout(pdfLayout)
             .importContentMode(importContentMode)
+            .preExtractedJson(preExtractedJson)
             .build();
     AssessmentImportResponse response = assessmentImportService.importAssessmentFromPdf(file, form);
     return ApiResponse.<AssessmentImportResponse>builder()
@@ -126,6 +180,19 @@ public class AssessmentController {
                 + response.getQuestionsImported()
                 + " câu hỏi. Vui lòng rà soát trước khi công khai.")
         .result(response)
+        .build();
+  }
+
+  @GetMapping("/{id}/import-source-pdf-url")
+  @PreAuthorize("hasAnyRole('TEACHER', 'ADMIN')")
+  @Operation(
+      summary = "Get presigned URL for import source PDF",
+      description =
+          "Returns a short-lived URL to view/download the original PDF stored on MinIO "
+              + "when the assessment was created via PDF import (Cách 2).")
+  public ApiResponse<AssessmentSourcePdfUrlResponse> getImportSourcePdfUrl(@PathVariable UUID id) {
+    return ApiResponse.<AssessmentSourcePdfUrlResponse>builder()
+        .result(assessmentService.getImportSourcePdfUrl(id))
         .build();
   }
 
